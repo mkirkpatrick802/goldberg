@@ -223,7 +223,7 @@ class Taiga(commands.Cog):
                 await interaction.followup.send("⚠️ No active sprint found.")
                 return
 
-            sprint_tasks = await self.get_user_stories(session, project_id, sprint.get("id"))
+            sprint_tasks  = await self.get_sprint_tasks(session, project_id, sprint.get("id"))
 
         print(f"[DEBUG] Taiga name from sheet: '{taiga_name}'")
         print(f"[DEBUG] Total tasks in sprint: {len(sprint_tasks)}")
