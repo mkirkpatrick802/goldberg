@@ -265,10 +265,10 @@ class Taiga(commands.Cog):
             await interaction.followup.send("No tasks found.")
             return
 
-        # Just dump the first task so we can see the structure
         import json
-        sample = json.dumps(tasks[0], indent=2)
-        await interaction.followup.send(f"```json\n{sample[:1900]}\n```")
+        print("[DEBUG TASKS] First task:")
+        print(json.dumps(tasks[0], indent=2))
+        await interaction.followup.send("Task dumped to console.")
 
 async def setup(bot):
     bot.add_cog(Taiga(bot))
