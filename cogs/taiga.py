@@ -225,6 +225,13 @@ class Taiga(commands.Cog):
 
             sprint_tasks = await self.get_user_stories(session, project_id, sprint.get("id"))
 
+        print(f"[DEBUG] Taiga name from sheet: '{taiga_name}'")
+        print(f"[DEBUG] Total tasks in sprint: {len(sprint_tasks)}")
+        for t in sprint_tasks:
+            assigned = t.get("assigned_to_extra_info")
+            print(
+                f"[DEBUG] Task: '{t.get('subject')}' | Assigned: '{assigned.get('full_name_display') if assigned else None}' | Status: '{t.get('status_extra_info', {}).get('name')}'")
+
         new_items = []
         in_progress_items = []
 
