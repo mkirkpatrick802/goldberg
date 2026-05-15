@@ -52,7 +52,7 @@ RANDOM_REPLIES = [
     "Fascinating. Truly. I'm so glad you shared that.",
     "Cool story. Needs more dragons.",
     "I've seen better takes in a fortune cookie.",
-    "Sir/Ma'am this is a game dev server.",
+    "Hey! This is a game dev server.",
     "Okay but have you tried turning your brain off and on again?",
     "I'm not saying you're wrong, but I'm not saying you're right either.",
     "This message has been noted and will be ignored.",
