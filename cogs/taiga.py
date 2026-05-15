@@ -105,39 +105,50 @@ class Taiga(commands.Cog):
             sprint_id = sprint.get("id")
 
             stories = await self.get_user_stories(session, project_id, sprint_id)
+            tasks = await self.get_sprint_tasks(session, project_id, sprint_id)
 
-            new_items = []
-            in_progress_items = []
+        # Group tasks by parent story
+        story_map = {s["id"]: s["subject"] for s in stories}
+        grouped = {}
 
-            for story in stories:
-                status = story.get("status_extra_info", {}).get("name", "").lower()
-                title = story.get("subject", "Untitled")
-                assigned = story.get("assigned_to_extra_info")
-                assignee = self.resolve_discord_mention(
-                    assigned.get("full_name_display", "Unassigned") if assigned else "Unassigned",
-                    sheet_data
-                )
+        for task in tasks:
+            status = task.get("status_extra_info", {}).get("name", "").lower()
+            if status not in ("new", "in progress"):
+                continue
 
-                if "new" in status:
-                    new_items.append(f"• {title} — {assignee}")
-                elif "in progress" in status or "in-progress" in status:
-                    in_progress_items.append(f"• {title} — {assignee}")
+            story_id = task.get("user_story")
+            story_title = story_map.get(story_id, "No Story")
+            if story_id not in grouped:
+                grouped[story_id] = {"title": story_title, "new": [], "in_progress": []}
 
-            lines = [f"📋 **Sprint Update — {sprint_name}**\n"]
+            task_title = task.get("subject", "Untitled")
+            assigned = task.get("assigned_to_extra_info")
+            assignee = self.resolve_discord_mention(
+                assigned.get("full_name_display", "Unassigned") if assigned else "Unassigned",
+                sheet_data
+            )
+            entry = f"  • {task_title} — {assignee}"
 
-            if new_items:
-                lines.append("🆕 **New**")
-                lines.extend(new_items)
-                lines.append("")
+            if status == "new":
+                grouped[story_id]["new"].append(entry)
+            else:
+                grouped[story_id]["in_progress"].append(entry)
 
-            if in_progress_items:
-                lines.append("🔄 **In Progress**")
-                lines.extend(in_progress_items)
+        if not grouped:
+            return f"📋 **Sprint Update — {sprint_name}**\n\n✅ No new or in progress tasks. Either you're crushing it or nobody's working."
 
-            if not new_items and not in_progress_items:
-                lines.append("✅ No new or in progress tasks. Either you're crushing it or nobody's working.")
+        lines = [f"📋 **Sprint Update — {sprint_name}**\n"]
+        for story_id, data in grouped.items():
+            lines.append(f"📖 **{data['title']}**")
+            if data["new"]:
+                lines.append("🆕 New")
+                lines.extend(data["new"])
+            if data["in_progress"]:
+                lines.append("🔄 In Progress")
+                lines.extend(data["in_progress"])
+            lines.append("")
 
-            return "\n".join(lines)
+        return "\n".join(lines)
 
     @tasks.loop(minutes=1, reconnect=True)
     async def sprint_update(self):
@@ -217,20 +228,21 @@ class Taiga(commands.Cog):
         new_items = []
         in_progress_items = []
 
-        for story in stories:
-            assigned = story.get("assigned_to_extra_info")
+        for task in tasks:
+            assigned = task.get("assigned_to_extra_info")
             if not assigned:
                 continue
             if assigned.get("full_name_display", "").strip().lower() != taiga_name.strip().lower():
                 continue
 
-            status = story.get("status_extra_info", {}).get("name", "").lower()
-            title = story.get("subject", "Untitled")
+            status = task.get("status_extra_info", {}).get("name", "").lower()
+            title = task.get("subject", "Untitled")
+            story_title = task.get("user_story_extra_info", {}).get("subject", "No Story")
 
-            if "new" in status:
-                new_items.append(f"• {title}")
-            elif "in progress" in status or "in-progress" in status:
-                in_progress_items.append(f"• {title}")
+            if status == "new":
+                new_items.append(f"• {title} *({story_title})*")
+            elif status == "in progress":
+                in_progress_items.append(f"• {title} *({story_title})*")
 
         lines = [f"📋 **Your Tasks — {sprint.get('name', 'Current Sprint')}**\n"]
 
@@ -251,24 +263,6 @@ class Taiga(commands.Cog):
             "\n".join(lines),
             allowed_mentions=nextcord.AllowedMentions.none()
         )
-
-    @nextcord.slash_command(name="debug_tasks", description="Debug raw task data.", guild_ids=[SERVER_ID])
-    async def debug_tasks(self, interaction: nextcord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        async with aiohttp.ClientSession() as session:
-            project_id = await self.get_project_id(session)
-            sprint = await self.get_current_sprint(session, project_id)
-            tasks = await self.get_sprint_tasks(session, project_id, sprint.get("id"))
-
-        if not tasks:
-            await interaction.followup.send("No tasks found.")
-            return
-
-        import json
-        print("[DEBUG TASKS] First task:")
-        print(json.dumps(tasks[0], indent=2))
-        await interaction.followup.send("Task dumped to console.")
 
 async def setup(bot):
     bot.add_cog(Taiga(bot))
