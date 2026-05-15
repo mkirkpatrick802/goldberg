@@ -71,43 +71,41 @@ class Taiga(commands.Cog):
 
     async def get_sprint_tasks(self, session, project_id, sprint_id):
         all_tasks = []
-        offset = 0
-        limit = 100
+        page = 1
 
         while True:
             resp = await session.get(
-                f"{TAIGA_URL}/api/v1/tasks?project={project_id}&milestone={sprint_id}&limit={limit}&offset={offset}",
+                f"{TAIGA_URL}/api/v1/tasks?project={project_id}&milestone={sprint_id}&page={page}",
                 headers={"Authorization": f"Bearer {self.token}"}
             )
-            print(f"[DEBUG] Status: {resp.status} Headers: {dict(resp.headers)}")
-            tasks = await resp.json()
-            print(f"[DEBUG] Tasks returned this page: {len(tasks)}")
-            if not tasks:
+            sprint_tasks = await resp.json()
+            if not sprint_tasks:
                 break
-            all_tasks.extend(tasks)
-            if len(tasks) < limit:
+            all_tasks.extend(sprint_tasks)
+            next_page = resp.headers.get("x-pagination-next")
+            if not next_page:
                 break
-            offset += limit
+            page += 1
 
         return all_tasks
 
     async def get_user_stories(self, session, project_id, sprint_id):
         all_stories = []
-        offset = 0
-        limit = 100
+        page = 1
 
         while True:
             resp = await session.get(
-                f"{TAIGA_URL}/api/v1/userstories?project={project_id}&milestone={sprint_id}&limit={limit}&offset={offset}",
+                f"{TAIGA_URL}/api/v1/userstories?project={project_id}&milestone={sprint_id}&page={page}",
                 headers={"Authorization": f"Bearer {self.token}"}
             )
             stories = await resp.json()
             if not stories:
                 break
             all_stories.extend(stories)
-            if len(stories) < limit:
+            next_page = resp.headers.get("x-pagination-next")
+            if not next_page:
                 break
-            offset += limit
+            page += 1
 
         return all_stories
 
