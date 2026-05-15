@@ -70,18 +70,44 @@ class Taiga(commands.Cog):
         return milestones[0]
 
     async def get_sprint_tasks(self, session, project_id, sprint_id):
-        resp = await session.get(
-            f"{TAIGA_URL}/api/v1/tasks?project={project_id}&milestone={sprint_id}",
-            headers={"Authorization": f"Bearer {self.token}"}
-        )
-        return await resp.json()
+        all_tasks = []
+        offset = 0
+        limit = 100
+
+        while True:
+            resp = await session.get(
+                f"{TAIGA_URL}/api/v1/tasks?project={project_id}&milestone={sprint_id}&limit={limit}&offset={offset}",
+                headers={"Authorization": f"Bearer {self.token}"}
+            )
+            tasks = await resp.json()
+            if not tasks:
+                break
+            all_tasks.extend(tasks)
+            if len(tasks) < limit:
+                break
+            offset += limit
+
+        return all_tasks
 
     async def get_user_stories(self, session, project_id, sprint_id):
-        resp = await session.get(
-            f"{TAIGA_URL}/api/v1/userstories?project={project_id}&milestone={sprint_id}",
-            headers={"Authorization": f"Bearer {self.token}"}
-        )
-        return await resp.json()
+        all_stories = []
+        offset = 0
+        limit = 100
+
+        while True:
+            resp = await session.get(
+                f"{TAIGA_URL}/api/v1/userstories?project={project_id}&milestone={sprint_id}&limit={limit}&offset={offset}",
+                headers={"Authorization": f"Bearer {self.token}"}
+            )
+            stories = await resp.json()
+            if not stories:
+                break
+            all_stories.extend(stories)
+            if len(stories) < limit:
+                break
+            offset += limit
+
+        return all_stories
 
     def resolve_discord_mention(self, taiga_full_name: str, sheet_data: list) -> str:
         for member in sheet_data:
