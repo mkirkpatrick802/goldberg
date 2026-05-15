@@ -220,7 +220,7 @@ class Taiga(commands.Cog):
 
         message = await self.build_sprint_message(sheet_data)
         for chunk in chunk_message(message):
-            await interaction.followup.send(chunk, allowed_mentions=nextcord.AllowedMentions.none())
+            await interaction.followup.send(chunk, allowed_mentions=nextcord.AllowedMentions.none(), ephemeral=True)
 
     @nextcord.slash_command(name="my_tasks", description="See your current tasks.", guild_ids=[SERVER_ID])
     async def my_tasks(self, interaction: nextcord.Interaction):
