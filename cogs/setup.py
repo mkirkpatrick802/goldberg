@@ -3,6 +3,8 @@ from nextcord.ext import commands
 import json
 import os
 
+from config import SERVER_ID
+
 DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 
 def load_config():
@@ -21,7 +23,7 @@ class Setup(commands.Cog):
         self.bot = bot
         self.config = load_config()
 
-    @nextcord.slash_command(name="setup", description="Goldberg setup commands.")
+    @nextcord.slash_command(name="setup", description="Goldberg setup commands.", guild_ids=[SERVER_ID])
     async def setup_group(self, interaction: nextcord.Interaction):
         pass
 

@@ -12,17 +12,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Load cogs
 async def load_cogs():
-    for filename in os.listdir('goldberg/cogs'):
+    cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
+    for filename in os.listdir(cogs_dir):
         if filename.endswith('.py'):
             try:
                 bot.load_extension(f'cogs.{filename[:-3]}')
                 print(f"Successfully loaded {filename}")
             except Exception as e:
                 print(f"Failed to load {filename}: {e}")
-
-@bot.event
-async def on_ready():
-    print(f"{bot.user.name} has connected to Discord!")
 
 @bot.event
 async def on_application_command_error(interaction, error):
@@ -83,6 +80,10 @@ async def on_message(message):
         await message.channel.send(response)
 
     await bot.process_commands(message)  # Ensure commands still work
+
+@bot.event
+async def on_ready():
+    print(f"{bot.user.name} has connected to Discord!")
 
 # Run the bot
 if __name__ == "__main__":
