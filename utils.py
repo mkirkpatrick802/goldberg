@@ -42,3 +42,17 @@ def get_sheet_members() -> list[dict]:
             "start_time": entry.get("Start Time", "").strip(),
         })
     return members
+
+def chunk_message(message: str, limit: int = 1900) -> list[str]:
+    """Split a message into chunks that fit within Discord's character limit."""
+    chunks = []
+    current = ""
+    for line in message.split("\n"):
+        if len(current) + len(line) + 1 > limit:
+            chunks.append(current)
+            current = line + "\n"
+        else:
+            current += line + "\n"
+    if current:
+        chunks.append(current)
+    return chunks

@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config import TAIGA_URL, TAIGA_USERNAME, TAIGA_PASSWORD, TAIGA_PROJECT_SLUG, SERVER_ID
-from utils import get_sheet_members
+from utils import get_sheet_members, chunk_message
 
 SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 EASTERN = ZoneInfo("America/New_York")
@@ -201,7 +201,8 @@ class Taiga(commands.Cog):
             sheet_data = []
 
         message = await self.build_sprint_message(sheet_data)
-        await channel.send(message, allowed_mentions=nextcord.AllowedMentions.none())
+        for chunk in chunk_message(message):
+            await channel.send(chunk, allowed_mentions=nextcord.AllowedMentions.none())
 
     @sprint_update.before_loop
     async def before_sprint_update(self):
@@ -218,7 +219,8 @@ class Taiga(commands.Cog):
             return
 
         message = await self.build_sprint_message(sheet_data)
-        await interaction.followup.send(message, allowed_mentions=nextcord.AllowedMentions.none())
+        for chunk in chunk_message(message):
+            await interaction.followup.send(chunk, allowed_mentions=nextcord.AllowedMentions.none())
 
     @nextcord.slash_command(name="my_tasks", description="See your current tasks.", guild_ids=[SERVER_ID])
     async def my_tasks(self, interaction: nextcord.Interaction):
