@@ -79,7 +79,9 @@ class Taiga(commands.Cog):
                 f"{TAIGA_URL}/api/v1/tasks?project={project_id}&milestone={sprint_id}&limit={limit}&offset={offset}",
                 headers={"Authorization": f"Bearer {self.token}"}
             )
+            print(f"[DEBUG] Status: {resp.status} Headers: {dict(resp.headers)}")
             tasks = await resp.json()
+            print(f"[DEBUG] Tasks returned this page: {len(tasks)}")
             if not tasks:
                 break
             all_tasks.extend(tasks)
