@@ -82,5 +82,19 @@ class Setup(commands.Cog):
             ephemeral=True
         )
 
+    @setup_group.subcommand(name="taiga_channel", description="Set the channel for Taiga sprint updates.")
+    async def setup_taiga_channel(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        self.config["taiga_channel_id"] = interaction.channel.id
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            f"✅ Taiga sprint updates will now be posted in {interaction.channel.mention}.",
+            ephemeral=True
+        )
+
 async def setup(bot):
     bot.add_cog(Setup(bot))

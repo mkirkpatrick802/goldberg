@@ -1,12 +1,10 @@
 import nextcord
 from nextcord.ext import commands, tasks
 from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
 import random
-from google.auth.transport.requests import Request
 
-from config import DATA_SHEET_KEY, OFFICE_HOUR_CHANNEL, SCOPES, SERVER_ID, SERVICE_ACCOUNT_FILE, TIMEZONE, WORKSHEET_NAME
+from config import OFFICE_HOUR_CHANNEL, SERVER_ID, TIMEZONE, WORKSHEET_NAME
+from utils import SCOPES, get_sheet_members
 
 # ─── Goldberg's Vocabulary ─────────────────────────────────────────────────────
 
@@ -44,28 +42,17 @@ SCHEDULE_FETCH_ERROR = [
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
 def get_schedule() -> list[dict]:
-    """Fetch and parse the schedule from Google Sheets."""
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(DATA_SHEET_KEY).worksheet(WORKSHEET_NAME)
-
-    # Row 1 is a merged header, row 2 is column headers, data starts row 3
-    all_rows = sheet.get_all_values()
-    headers = [h.strip() for h in all_rows[1]]
-    data_rows = all_rows[2:]
-
+    """Fetch and parse the office hours schedule."""
+    members = get_sheet_members()
     schedule = []
-    for row in data_rows:
-        entry = dict(zip(headers, row))
-        if entry.get("Active", "").upper() != "TRUE":
-            continue
-        if not entry.get("Day of the Week") or not entry.get("Start Time"):
+    for member in members:
+        if not member.get("day") or not member.get("start_time"):
             continue
         schedule.append({
-            "name":       entry["Name"],
-            "discord_id": str(entry["Discord ID"]).strip(),
-            "day":        entry["Day of the Week"].strip(),
-            "start_time": entry["Start Time"].strip(),
+            "name":       member["name"],
+            "discord_id": member["discord_id"],
+            "day":        member["day"],
+            "start_time": member["start_time"],
         })
     return schedule
 

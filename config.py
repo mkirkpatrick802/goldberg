@@ -21,14 +21,15 @@ REPO_SIGNUP_LINK        = _require("REPO_SIGNUP_LINK")
 #Office Hour Info
 OFFICE_HOUR_CHANNEL     = int(_require("OFFICE_HOUR_CHANNEL"))
 
+#Taiga Info
+TAIGA_URL      = _require("TAIGA_URL")
+TAIGA_USERNAME = _require("TAIGA_USERNAME")
+TAIGA_PASSWORD = _require("TAIGA_PASSWORD")
+TAIGA_PROJECT_SLUG = _require("TAIGA_PROJECT_SLUG")
+
 # Data Info
 DATA_SHEET_KEY          = _require("DATA_SHEET_KEY")
 SERVICE_ACCOUNT_FILE    = _require("SERVICE_ACCOUNT_FILE")
 WORKSHEET_NAME          = "Sheet1"
 TIMEZONE                = ZoneInfo("America/New_York")
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
 
