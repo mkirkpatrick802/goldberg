@@ -6,7 +6,7 @@ import os
 import pytz
 
 eastern = pytz.timezone("US/Eastern")
-DATA_FILE = "goldberg/data/clock_data.json"
+DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "clock_data.json")
 
 def load_data():
     if not os.path.exists(DATA_FILE):

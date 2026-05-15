@@ -219,3 +219,6 @@ __marimo__/
 
 # Goldberg specfic
 data/
+
+# Jetbrains
+.idea/

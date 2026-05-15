@@ -1,4 +1,6 @@
 ﻿import asyncio
+import json
+import os
 import re
 import subprocess
 import random
@@ -8,6 +10,8 @@ import dateutil.parser
 import xml.etree.ElementTree as ET
 
 from config import SERVER_ID, REPO_LINK
+
+_SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 
 # List of funny messages for missing commit messages
 funny_messages = [
@@ -45,6 +49,12 @@ funny_messages = [
 
 last_commit = None
 
+def _get_commit_channel_id():
+    try:
+        with open(_SETUP_FILE, "r") as f:
+            return json.load(f).get("commit_channel_id")
+    except FileNotFoundError:
+        return None
 
 async def get_latest_commit():
     """Fetch the latest commit details from SVN."""
@@ -127,7 +137,10 @@ class SvnCommits(commands.Cog):
             if guild is None:
                 return
 
-            commit_channel_id = 1354153095009013821
+            commit_channel_id = _get_commit_channel_id()
+            if commit_channel_id is None:
+                print("[Check SVN Commits] No commit channel set. Use /setup commits.")
+                return
             channel = guild.get_channel(commit_channel_id)
             if channel is None:
                 return
