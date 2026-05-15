@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import TAIGA_URL, TAIGA_USERNAME, TAIGA_PASSWORD, TAIGA_PROJECT_SLUG
+from config import TAIGA_URL, TAIGA_USERNAME, TAIGA_PASSWORD, TAIGA_PROJECT_SLUG, SERVER_ID
 from utils import get_sheet_members
 
 SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
@@ -169,6 +169,88 @@ class Taiga(commands.Cog):
     @sprint_update.before_loop
     async def before_sprint_update(self):
         await self.bot.wait_until_ready()
+
+    @nextcord.slash_command(name="sprint_board", description="See the current sprint board.", guild_ids=[SERVER_ID])
+    async def sprint_board(self, interaction: nextcord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            sheet_data = get_sheet_members()
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Failed to load sheet data: {e}")
+            return
+
+        message = await self.build_sprint_message(sheet_data)
+        await interaction.followup.send(message, allowed_mentions=nextcord.AllowedMentions.none())
+
+    @nextcord.slash_command(name="my_tasks", description="See your current tasks.", guild_ids=[SERVER_ID])
+    async def my_tasks(self, interaction: nextcord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            sheet_data = get_sheet_members()
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Failed to load sheet data: {e}")
+            return
+
+        # Find the user's Taiga name from the sheet
+        user_id = str(interaction.user.id)
+        taiga_name = None
+        for member in sheet_data:
+            if member.get("discord_id") == user_id:
+                taiga_name = member.get("taiga_name")
+                break
+
+        if not taiga_name:
+            await interaction.followup.send("⚠️ I don't know who you are in Taiga. Bug your admin.", ephemeral=True)
+            return
+
+        async with aiohttp.ClientSession() as session:
+            project_id = await self.get_project_id(session)
+            sprint = await self.get_current_sprint(session, project_id)
+            if not sprint:
+                await interaction.followup.send("⚠️ No active sprint found.")
+                return
+
+            stories = await self.get_user_stories(session, project_id, sprint.get("id"))
+
+        new_items = []
+        in_progress_items = []
+
+        for story in stories:
+            assigned = story.get("assigned_to_extra_info")
+            if not assigned:
+                continue
+            if assigned.get("full_name_display", "").strip().lower() != taiga_name.strip().lower():
+                continue
+
+            status = story.get("status_extra_info", {}).get("name", "").lower()
+            title = story.get("subject", "Untitled")
+
+            if "new" in status:
+                new_items.append(f"• {title}")
+            elif "in progress" in status or "in-progress" in status:
+                in_progress_items.append(f"• {title}")
+
+        lines = [f"📋 **Your Tasks — {sprint.get('name', 'Current Sprint')}**\n"]
+
+        if new_items:
+            lines.append("🆕 **New**")
+            lines.extend(new_items)
+            lines.append("")
+
+        if in_progress_items:
+            lines.append("🔄 **In Progress**")
+            lines.extend(in_progress_items)
+
+        if not new_items and not in_progress_items:
+            lines.append(
+                "✅ No new or in progress tasks. Either you're done or you haven't started. Goldberg isn't judging. (He is.)")
+
+        await interaction.followup.send(
+            "\n".join(lines),
+            allowed_mentions=nextcord.AllowedMentions.none()
+        )
 
 async def setup(bot):
     bot.add_cog(Taiga(bot))
