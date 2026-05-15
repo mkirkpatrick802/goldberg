@@ -223,12 +223,12 @@ class Taiga(commands.Cog):
                 await interaction.followup.send("⚠️ No active sprint found.")
                 return
 
-            stories = await self.get_user_stories(session, project_id, sprint.get("id"))
+            sprint_tasks = await self.get_user_stories(session, project_id, sprint.get("id"))
 
         new_items = []
         in_progress_items = []
 
-        for task in tasks:
+        for task in sprint_tasks:
             assigned = task.get("assigned_to_extra_info")
             if not assigned:
                 continue
