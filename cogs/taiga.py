@@ -252,5 +252,23 @@ class Taiga(commands.Cog):
             allowed_mentions=nextcord.AllowedMentions.none()
         )
 
+    @nextcord.slash_command(name="debug_tasks", description="Debug raw task data.", guild_ids=[SERVER_ID])
+    async def debug_tasks(self, interaction: nextcord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        async with aiohttp.ClientSession() as session:
+            project_id = await self.get_project_id(session)
+            sprint = await self.get_current_sprint(session, project_id)
+            tasks = await self.get_sprint_tasks(session, project_id, sprint.get("id"))
+
+        if not tasks:
+            await interaction.followup.send("No tasks found.")
+            return
+
+        # Just dump the first task so we can see the structure
+        import json
+        sample = json.dumps(tasks[0], indent=2)
+        await interaction.followup.send(f"```json\n{sample[:1900]}\n```")
+
 async def setup(bot):
     bot.add_cog(Taiga(bot))
