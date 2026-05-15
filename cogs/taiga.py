@@ -222,6 +222,37 @@ class Taiga(commands.Cog):
         for chunk in chunk_message(message):
             await interaction.followup.send(chunk, allowed_mentions=nextcord.AllowedMentions.none(), ephemeral=True)
 
+    @nextcord.slash_command(name="test_sprint_update", description="Manually trigger the sprint update.", guild_ids=[SERVER_ID])
+    async def test_sprint_update(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+    
+        await interaction.response.defer(ephemeral=True)
+    
+        setup = load_setup()
+        channel_id = setup.get("taiga_channel_id")
+        if not channel_id:
+            await interaction.followup.send("⚠️ No taiga channel set. Use /setup taiga_channel first.", ephemeral=True)
+            return
+    
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            await interaction.followup.send("⚠️ Could not find the taiga channel.", ephemeral=True)
+            return
+    
+        try:
+            sheet_data = get_sheet_members()
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Failed to load sheet data: {e}", ephemeral=True)
+            return
+    
+        message = await self.build_sprint_message(sheet_data)
+        for chunk in chunk_message(message):
+            await channel.send(chunk, allowed_mentions=nextcord.AllowedMentions.none())
+    
+        await interaction.followup.send("✅ Sprint update sent.", ephemeral=True)
+
     @nextcord.slash_command(name="my_tasks", description="See your current tasks.", guild_ids=[SERVER_ID])
     async def my_tasks(self, interaction: nextcord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -252,13 +283,6 @@ class Taiga(commands.Cog):
                 return
 
             sprint_tasks  = await self.get_sprint_tasks(session, project_id, sprint.get("id"))
-
-        print(f"[DEBUG] Taiga name from sheet: '{taiga_name}'")
-        print(f"[DEBUG] Total tasks in sprint: {len(sprint_tasks)}")
-        for t in sprint_tasks:
-            assigned = t.get("assigned_to_extra_info")
-            print(
-                f"[DEBUG] Task: '{t.get('subject')}' | Assigned: '{assigned.get('full_name_display') if assigned else None}' | Status: '{t.get('status_extra_info', {}).get('name')}'")
 
         new_items = []
         in_progress_items = []
