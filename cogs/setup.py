@@ -41,5 +41,46 @@ class Setup(commands.Cog):
             ephemeral=True
         )
 
+    @setup_group.subcommand(name="add_bully_channel", description="Add this channel to Goldberg's bully channels.")
+    async def setup_bully_channel(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        bully_channels = self.config.get("bully_channels", [])
+        if interaction.channel.id in bully_channels:
+            await interaction.response.send_message("This channel is already a bully channel.", ephemeral=True)
+            return
+
+        bully_channels.append(interaction.channel.id)
+        self.config["bully_channels"] = bully_channels
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            f"✅ {interaction.channel.mention} added to bully channels.",
+            ephemeral=True
+        )
+
+    @setup_group.subcommand(name="remove_bully_channel",
+                            description="Remove this channel from Goldberg's bully channels.")
+    async def remove_bully_channel(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        bully_channels = self.config.get("bully_channels", [])
+        if interaction.channel.id not in bully_channels:
+            await interaction.response.send_message("This channel isn't a bully channel.", ephemeral=True)
+            return
+
+        bully_channels.remove(interaction.channel.id)
+        self.config["bully_channels"] = bully_channels
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            f"✅ {interaction.channel.mention} removed from bully channels.",
+            ephemeral=True
+        )
+
 async def setup(bot):
     bot.add_cog(Setup(bot))
