@@ -32,6 +32,8 @@ class Taiga(commands.Cog):
         await self.authenticate()
         if not self.sprint_update.is_running():
             self.sprint_update.start()
+        if not self.refresh_token.is_running():
+            self.refresh_token.start()
 
     async def authenticate(self):
         async with aiohttp.ClientSession() as session:
@@ -55,6 +57,13 @@ class Taiga(commands.Cog):
             f"{TAIGA_URL}/api/v1/projects/by_slug?slug={TAIGA_PROJECT_SLUG}",
             headers={"Authorization": f"Bearer {self.token}"}
         )
+        if resp.status == 401:
+            print("[Taiga] Token expired, re-authenticating...")
+            await self.authenticate()
+            resp = await session.get(
+                f"{TAIGA_URL}/api/v1/projects/by_slug?slug={TAIGA_PROJECT_SLUG}",
+                headers={"Authorization": f"Bearer {self.token}"}
+            )
         data = await resp.json()
         return data.get("id")
 
@@ -206,6 +215,15 @@ class Taiga(commands.Cog):
 
     @sprint_update.before_loop
     async def before_sprint_update(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def refresh_token(self):
+        print("[Taiga] Refreshing auth token...")
+        await self.authenticate()
+
+    @refresh_token.before_loop
+    async def before_refresh_token(self):
         await self.bot.wait_until_ready()
 
     @nextcord.slash_command(name="sprint_board", description="See the current sprint board.", guild_ids=[SERVER_ID])

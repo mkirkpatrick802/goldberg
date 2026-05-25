@@ -111,7 +111,7 @@ class Bully(commands.Cog):
         # Random behavior in bully channels only
         if in_bully_channel:
             roll = random.random()
-            if roll < 0.05:
+            if roll < 0.01:
                 reply = random.choice(RANDOM_REPLIES)
                 await message.channel.send(reply.format(mention=message.author.mention))
             elif roll < 0.10:
