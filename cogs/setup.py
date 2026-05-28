@@ -96,5 +96,33 @@ class Setup(commands.Cog):
             ephemeral=True
         )
 
+    @setup_group.subcommand(name="standup_channel", description="Set the channel for stand-up tracking.")
+    async def setup_standup_channel(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        self.config["standup_channel_id"] = interaction.channel.id
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            f"✅ Stand-up tracking will now monitor {interaction.channel.mention}.",
+            ephemeral=True
+        )
+
+    @setup_group.subcommand(name="report_channel", description="Set the channel for sprintly reports.")
+    async def setup_report_channel(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        self.config["report_channel_id"] = interaction.channel.id
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            f"✅ Sprintly reports will be posted in {interaction.channel.mention}.",
+            ephemeral=True
+        )
+
 async def setup(bot):
     bot.add_cog(Setup(bot))
