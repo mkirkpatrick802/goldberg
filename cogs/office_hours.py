@@ -59,6 +59,8 @@ def get_schedule() -> list[dict]:
 
 def is_office_hour_starting(entry: dict, now: datetime) -> bool:
     """Return True if this entry's office hour is starting at `now` (to the minute)."""
+    if entry.get("Active", "").upper() != "TRUE":
+        return False
     if now.strftime("%A") != entry["day"]:
         return False
     try:

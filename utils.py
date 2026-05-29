@@ -30,8 +30,6 @@ def get_sheet_members() -> list[dict]:
     members = []
     for row in data_rows:
         entry = dict(zip(headers, row))
-        if entry.get("Active", "").upper() != "TRUE":
-            continue
         if not entry.get("Name"):
             continue
         members.append({
