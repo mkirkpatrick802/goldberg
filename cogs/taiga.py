@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config import TAIGA_URL, TAIGA_USERNAME, TAIGA_PASSWORD, TAIGA_PROJECT_SLUG, SERVER_ID
-from utils import get_sheet_members, chunk_message
+from utils import get_sheet_members, chunk_message, is_dev
 
 SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 EASTERN = ZoneInfo("America/New_York")
@@ -228,6 +228,13 @@ class Taiga(commands.Cog):
 
     @nextcord.slash_command(name="sprint_board", description="See the current sprint board.", guild_ids=[SERVER_ID])
     async def sprint_board(self, interaction: nextcord.Interaction):
+        if not is_dev(interaction):
+            await interaction.response.send_message(
+                "Devs only. If you have to ask why, you're not one. 🕶️",
+                ephemeral=True
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -273,6 +280,13 @@ class Taiga(commands.Cog):
 
     @nextcord.slash_command(name="my_tasks", description="See your current tasks.", guild_ids=[SERVER_ID])
     async def my_tasks(self, interaction: nextcord.Interaction):
+        if not is_dev(interaction):
+            await interaction.response.send_message(
+                "Devs only. If you have to ask why, you're not one. 🕶️",
+                ephemeral=True
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         try:

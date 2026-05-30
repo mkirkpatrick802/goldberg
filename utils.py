@@ -3,6 +3,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 
+def is_dev(interaction) -> bool:
+    dev_role_id = 1374926068364083280
+    if not interaction.guild:
+        return False
+    return any(role.id == dev_role_id for role in interaction.user.roles)
+
 def user_has_any_role(interaction, role_names: list[str]) -> bool:
     if not interaction.guild:
         return False

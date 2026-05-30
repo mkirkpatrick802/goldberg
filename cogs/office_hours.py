@@ -4,7 +4,7 @@ from datetime import datetime
 import random
 
 from config import OFFICE_HOUR_CHANNEL, SERVER_ID, TIMEZONE, WORKSHEET_NAME
-from utils import SCOPES, get_sheet_members
+from utils import SCOPES, get_sheet_members, is_dev
 
 # ─── Goldberg's Vocabulary ─────────────────────────────────────────────────────
 
@@ -166,6 +166,12 @@ class OfficeHours(commands.Cog):
         guild_ids=[SERVER_ID]
     )
     async def office_hours_today(self, interaction: nextcord.Interaction):
+        if not is_dev(interaction):
+            await interaction.response.send_message(
+                "Devs only. If you have to ask why, you're not one. 🕶️",
+                ephemeral=True
+            )
+            return
         now = datetime.now(TIMEZONE)
         today = now.strftime("%A")
 
@@ -205,6 +211,12 @@ class OfficeHours(commands.Cog):
         guild_ids=[SERVER_ID]
     )
     async def full_schedule(self, interaction: nextcord.Interaction):
+        if not is_dev(interaction):
+            await interaction.response.send_message(
+                "Devs only. If you have to ask why, you're not one. 🕶️",
+                ephemeral=True
+            )
+            return
 
         # ephemeral=True on defer() is what makes the whole interaction ephemeral in nextcord
         await interaction.response.defer(ephemeral=True)

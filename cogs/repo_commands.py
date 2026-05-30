@@ -1,19 +1,21 @@
 ﻿import nextcord
 from nextcord.ext import commands
 
-from config import REPO_LINK, REPO_SIGNUP_LINK
-from utils import user_has_any_role
+from config import REPO_LINK, REPO_SIGNUP_LINK, SERVER_ID
+from utils import is_dev
 
 
 class RepoCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @nextcord.slash_command(name="repo", description="Let's get you in that repo!",
-                            guild_ids=[1353924127303532648])
+    @nextcord.slash_command(name="repo", description="Let's get you in that repo!", guild_ids=[SERVER_ID])
     async def repo(self, interaction: nextcord.Interaction):
-        if not user_has_any_role(interaction, ["Dev"]):
-            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        if not is_dev(interaction):
+            await interaction.response.send_message(
+                "Devs only. If you have to ask why, you're not one. 🕶️",
+                ephemeral=True
+            )
             return
         
         await interaction.response.send_message(
