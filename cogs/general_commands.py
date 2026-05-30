@@ -98,6 +98,11 @@ class GeneralCommands(commands.Cog):
             color=0xc8521a
         )
         embed.add_field(
+            name="📚 /documentation",
+            value="Internal team docs. Figma, Drive, all of it.",
+            inline=False
+        )
+        embed.add_field(
             name="📋 /repo",
             value="Walks you through getting SVN access. Yes, it's that simple. No, you don't need to ping someone.",
             inline=False
@@ -128,7 +133,7 @@ class GeneralCommands(commands.Cog):
             inline=False
         )
         embed.set_footer(text="You're welcome. 💅")
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
     bot.add_cog(GeneralCommands(bot))
