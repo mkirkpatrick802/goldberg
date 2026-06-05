@@ -44,6 +44,7 @@ def get_sheet_members() -> list[dict]:
             "taiga_name": entry.get("Username", "").strip(),
             "day": entry.get("Day of the Week", "").strip(),
             "start_time": entry.get("Start Time", "").strip(),
+            "active" : entry.get("Active", "").strip(),
         })
     return members
 

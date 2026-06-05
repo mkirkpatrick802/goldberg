@@ -53,13 +53,14 @@ def get_schedule() -> list[dict]:
             "discord_id": member["discord_id"],
             "day":        member["day"],
             "start_time": member["start_time"],
+            "active":     member["active"],
         })
     return schedule
 
 
 def is_office_hour_starting(entry: dict, now: datetime) -> bool:
     """Return True if this entry's office hour is starting at `now` (to the minute)."""
-    if entry.get("Active", "").upper() != "TRUE":
+    if entry.get("active", "").upper() != "TRUE":
         return False
     if now.strftime("%A") != entry["day"]:
         return False
