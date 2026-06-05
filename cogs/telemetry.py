@@ -90,6 +90,10 @@ class Telemetry(commands.Cog):
             milestones = await resp.json()
             if not milestones:
                 return None, None
+            
+            if not isinstance(milestones, list) or len(milestones) == 0:
+                return None, None
+            
             sprint = milestones[0]
             return sprint.get("name"), project_id
 
@@ -133,6 +137,10 @@ class Telemetry(commands.Cog):
     @check_sprint.before_loop
     async def before_check_sprint(self):
         await self.bot.wait_until_ready()
+
+    @check_sprint.error
+    async def check_sprint_error(self, error):
+        print(f"[Telemetry] check_sprint error: {error}")
 
     # ── Stand-up tracking ───────────────────────────────────────────────────────
 
@@ -303,6 +311,10 @@ class Telemetry(commands.Cog):
     @taiga_completion_check.before_loop
     async def before_taiga_check(self):
         await self.bot.wait_until_ready()
+
+    @taiga_completion_check.error
+    async def taiga_completion_check_error(self, error):
+        print(f"[Telemetry] taiga_completion_check error: {error}")
 
 
 async def setup(bot):
