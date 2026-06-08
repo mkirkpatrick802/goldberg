@@ -124,5 +124,29 @@ class Setup(commands.Cog):
             ephemeral=True
         )
 
+    @setup_group.subcommand(name="dev_zone", description="Set the Dev Zone category for voice tracking.")
+    async def setup_dev_zone(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        if not isinstance(interaction.channel, nextcord.TextChannel):
+            await interaction.response.send_message("Run this from a text channel inside the Dev Zone category.",
+                                                    ephemeral=True)
+            return
+
+        category = interaction.channel.category
+        if not category:
+            await interaction.response.send_message("This channel has no category.", ephemeral=True)
+            return
+
+        self.config["dev_zone_category_id"] = category.id
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            f"✅ Dev Zone set to category **{category.name}** (`{category.id}`).",
+            ephemeral=True
+        )
+
 async def setup(bot):
     bot.add_cog(Setup(bot))
