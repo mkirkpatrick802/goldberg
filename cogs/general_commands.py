@@ -108,6 +108,11 @@ class GeneralCommands(commands.Cog):
             inline=False
         )
         embed.add_field(
+            name="📦 /builds",
+            value="Gets you the download link for the latest game builds. Dev and tester role only.",
+            inline=False
+        )
+        embed.add_field(
             name="🗂️ /sprint_board",
             value="Shows the current sprint tasks. Grouped. Organized. Unlike your commit history.",
             inline=False
@@ -134,6 +139,22 @@ class GeneralCommands(commands.Cog):
         )
         embed.set_footer(text="You're welcome. 💅")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @nextcord.slash_command(name="builds", description="Get the link to download the latest game builds.", guild_ids=[SERVER_ID])
+        async def builds(self, interaction: nextcord.Interaction):
+            dev_role_id = 1374926068364083280
+            tester_role_id = 1394048323698036786
+            user_roles = {role.id for role in interaction.user.roles}
+
+            if dev_role_id not in user_roles and tester_role_id not in user_roles:
+                await interaction.response.send_message("You need the dev or tester role to access builds. 🕶️",
+                                                        ephemeral=True)
+                return
+
+            await interaction.response.send_message(
+                "📦 **Game Builds**\nDownload the latest playable build here:\nhttps://themapleserver.themaplebarrel.com/builds/",
+                ephemeral=True
+            )
 
 async def setup(bot):
     bot.add_cog(GeneralCommands(bot))
