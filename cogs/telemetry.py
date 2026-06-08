@@ -191,7 +191,7 @@ class Telemetry(commands.Cog):
             return
 
         setup        = load_setup_config()
-        category_id  = setup.get("discipline_zone_category_id")
+        category_id  = setup.get("dev_zone_category_id")
         now          = datetime.now(EASTERN)
         user_id      = str(member.id)
 
