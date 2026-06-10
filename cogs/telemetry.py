@@ -36,7 +36,7 @@ def load_setup_config():
 
 def blank_user():
     return {
-        "office_hours_attended":  False,
+        "office_hours_attended":  0,
         "office_hours_attendees": 0,
         "standup_days":           [],
         "taiga_complete":         None,
@@ -244,10 +244,11 @@ class Telemetry(commands.Cog):
                                 sprint = data.get("current_sprint")
                                 if sprint:
                                     ensure_user(data, sprint, user_id)
-                                    if not data["sprints"][sprint][user_id]["office_hours_attended"]:
-                                        data["sprints"][sprint][user_id]["office_hours_attended"] = True
+                                    current = data["sprints"][sprint][user_id]["office_hours_attended"]
+                                    if current < 2:
+                                        data["sprints"][sprint][user_id]["office_hours_attended"] = current + 1
                                         save_telemetry(data)
-                                        print(f"[Telemetry] Office hours attendance logged for {member.name}")
+                                        print(f"[Telemetry] Office hours attendance logged for {member.name} ({current + 1}/2)")
 
                 # ── Office hours popularity (count attendees joining host's VC) ──
                 # Check if this channel currently has a host running office hours
