@@ -1,6 +1,5 @@
 import os
-import gspread
-from google.oauth2.service_account import Credentials
+import sys
 
 
 def is_dev(interaction) -> bool:
@@ -9,44 +8,42 @@ def is_dev(interaction) -> bool:
         return False
     return any(role.id == dev_role_id for role in interaction.user.roles)
 
+
 def user_has_any_role(interaction, role_names: list[str]) -> bool:
     if not interaction.guild:
         return False
-    
+
     user_roles = {role.name for role in interaction.user.roles}
     return bool(user_roles & set(role_names))
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
+
+# ── Shared database access ────────────────────────────────────────────────────
+# The bot is a submodule under the-maple-server/. The shared SQLite database (the
+# single source of truth that replaced the Google Sheet) lives one level up at
+# maple-server/shared/database.py. We add that folder to the path lazily so the
+# bot doesn't need to know about it anywhere else, and importing the bot in
+# isolation doesn't hard-fail.
+_SHARED_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared")
+)
+
 
 def get_sheet_members() -> list[dict]:
-    """Fetch and return all active members from the Google Sheet."""
-    from config import DATA_SHEET_KEY, SERVICE_ACCOUNT_FILE
+    """
+    Return all active members from the shared database.
 
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(DATA_SHEET_KEY).worksheet("Sheet1")
+    Kept the name 'get_sheet_members' (and the exact return shape) so every cog
+    that already calls it — office hours, Taiga matching, telemetry — keeps
+    working without any change. The data just comes from SQLite now, not Sheets.
 
-    all_rows = sheet.get_all_values()
-    headers = [h.strip() for h in all_rows[1]]
-    data_rows = all_rows[2:]
+    Returned dicts: name, discord_id, taiga_name, day, start_time, active.
+    """
+    if _SHARED_DIR not in sys.path:
+        sys.path.insert(0, _SHARED_DIR)
 
-    members = []
-    for row in data_rows:
-        entry = dict(zip(headers, row))
-        if not entry.get("Name"):
-            continue
-        members.append({
-            "name": entry.get("Name", "").strip(),
-            "discord_id": entry.get("Discord ID", "").strip(),
-            "taiga_name": entry.get("Username", "").strip(),
-            "day": entry.get("Day of the Week", "").strip(),
-            "start_time": entry.get("Start Time", "").strip(),
-            "active" : entry.get("Active", "").strip(),
-        })
-    return members
+    import database  # resolved from the shared folder
+    return database.get_sheet_members()
+
 
 def chunk_message(message: str, limit: int = 1900) -> list[str]:
     """Split a message into chunks that fit within Discord's character limit."""
