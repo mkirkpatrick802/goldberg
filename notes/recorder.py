@@ -10,6 +10,7 @@ The library writes one raw PCM file per SSRC and resolves each to a Member, so
 pipeline label the transcript and interleave everyone onto one timeline.
 """
 
+import asyncio
 import shutil
 import wave
 from dataclasses import dataclass, field
@@ -133,10 +134,59 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    guild = voice_channel.guild
+
+    # A previous attempt that half-connected can leave a dangling voice client on
+    # the guild. connect(cls=...) then reuses or collides with that stale, often
+    # already-disconnected object, and listen() reports "not connected". Clear it
+    # first so every /takenotes starts from a clean slate.
+    existing = guild.voice_client
+    if existing is not None:
+        print(
+            f"[Notes] Guild {guild.id} already had a voice client "
+            f"(connected={existing.is_connected()}); disconnecting it first."
+        )
+        try:
+            await existing.disconnect(force=True)
+        except Exception as e:
+            print(f"[Notes] Couldn't clear the stale voice client: {e}")
+
+    print(f"[Notes] Connecting to voice channel {voice_channel.id}...")
     voice_client: VoiceClient = await voice_channel.connect(cls=VoiceClient)
+    print(
+        f"[Notes] connect() returned {type(voice_client).__name__}; "
+        f"is_connected={voice_client.is_connected()}"
+    )
+
+    # connect() should return already-connected, but if the handshake is still
+    # settling, poll briefly rather than charging into a listen() that throws.
+    for _ in range(50):  # up to ~5s
+        if voice_client.is_connected():
+            break
+        await asyncio.sleep(0.1)
+
+    if not voice_client.is_connected():
+        # Surface the real state instead of the opaque "Not connected to voice".
+        print(
+            f"[Notes] Still not connected after waiting. "
+            f"ws={getattr(voice_client, 'ws', '?')!r} "
+            f"channel={getattr(voice_client, 'channel', '?')!r}"
+        )
+        try:
+            await voice_client.disconnect(force=True)
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Joined the channel but the voice connection never became ready — "
+            "the handshake didn't complete. This is a voice-stack problem, not a "
+            "permissions or command problem."
+        )
+
     sink = AudioFileSink(AudioFile, output_dir=str(out_dir))
 
+    print("[Notes] Connected. Starting listener...")
     voice_client.listen(sink, _get_process_pool())
+    print("[Notes] Listening.")
 
     return RecordingSession(
         voice_client=voice_client,

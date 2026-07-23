@@ -112,6 +112,12 @@ class Notes(commands.Cog):
             session = await recorder.start(voice_state.channel, session_dir, title)
         except Exception as e:
             shutil.rmtree(session_dir, ignore_errors=True)
+            # Log the full traceback to goldberg.log — the Discord message only
+            # shows the final line, which for voice failures is uselessly vague.
+            print(f"[Notes] /takenotes failed to start recording: {e!r}")
+            import traceback
+
+            traceback.print_exc()
             await interaction.followup.send(
                 f"Couldn't start recording. Something's broken.\n```{e}```"
             )
