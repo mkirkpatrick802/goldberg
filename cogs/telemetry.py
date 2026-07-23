@@ -3,10 +3,13 @@ from nextcord.ext import commands
 from nextcord.ext import tasks as ext_tasks
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import asyncio
 import json
 import os
+import subprocess
+import xml.etree.ElementTree as ET
 
-from config import SERVER_ID, TAIGA_URL, TAIGA_PROJECT_SLUG
+from config import SERVER_ID, TAIGA_URL, TAIGA_PROJECT_SLUG, REPO_LINK
 from utils import get_sheet_members
 
 TELEMETRY_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "telemetry.json"))
@@ -16,6 +19,7 @@ EASTERN = ZoneInfo("America/New_York")
 OFFICE_HOUR_BUFFER_MINUTES = 30
 TAIGA_CHECK_HOUR   = 19
 TAIGA_CHECK_MINUTE = 0
+SVN_CHECK_MINUTES  = 5
 
 def load_telemetry():
     if not os.path.exists(TELEMETRY_FILE):
@@ -36,6 +40,7 @@ def load_setup_config():
 
 def blank_user():
     return {
+        "commits":                0,
         "office_hours_attended":  0,
         "office_hours_attendees": 0,
         "standup_days":           [],
@@ -49,6 +54,52 @@ def ensure_user(data, sprint, user_id):
     # Back-fill any missing keys for existing entries
     for k, v in blank_user().items():
         data["sprints"][sprint][user_id].setdefault(k, v)
+
+
+# ── SVN helpers (blocking; call via asyncio.to_thread) ────────────────────────
+# These deliberately don't reuse commit_notifier's fetch: that one asks for only
+# the single newest commit, which is fine for announcing but would undercount
+# here whenever two commits land inside one poll window.
+
+_SVN_BASE_FLAGS = [
+    "--non-interactive",
+    "--config-option", "servers:global:http-timeout=8",
+    "--trust-server-cert",
+]
+
+
+def _run_svn(args, timeout):
+    result = subprocess.run(
+        ["svn", *args, *_SVN_BASE_FLAGS, REPO_LINK],
+        text=True, capture_output=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or "").strip() or f"svn exited {result.returncode}")
+    return result.stdout
+
+
+def svn_head_revision():
+    """The repo's current revision number."""
+    return int(_run_svn(["info", "--show-item", "revision"], timeout=15).strip())
+
+
+def svn_log_from(revision):
+    """
+    Every commit from `revision` through HEAD as (revision, author) pairs.
+
+    The range starts at a revision we know exists rather than revision + 1,
+    which SVN rejects once we've caught up to HEAD. The caller drops the
+    first entry, having already counted it.
+    """
+    out = _run_svn(["log", "-r", f"{revision}:HEAD", "--xml"], timeout=30)
+    entries = []
+    for entry in ET.fromstring(out).findall("logentry"):
+        author = entry.find("author")
+        entries.append((
+            int(entry.get("revision")),
+            author.text.strip() if author is not None and author.text else "",
+        ))
+    return entries
 
 
 class Telemetry(commands.Cog):
@@ -65,6 +116,8 @@ class Telemetry(commands.Cog):
             self.check_sprint.start()
         if not self.taiga_completion_check.is_running():
             self.taiga_completion_check.start()
+        if not self.check_svn_commits.is_running():
+            self.check_svn_commits.start()
 
     # ── Taiga Auth ──────────────────────────────────────────────────────────────
 
@@ -295,6 +348,81 @@ class Telemetry(commands.Cog):
                         save_telemetry(data)
                         print(f"[Telemetry] {member.name} joined {host['name']}'s office hours")
                     break
+
+    # ── SVN commit tracking ─────────────────────────────────────────────────────
+
+    @ext_tasks.loop(minutes=SVN_CHECK_MINUTES)
+    async def check_svn_commits(self):
+        """
+        Count commits per member for the current sprint.
+
+        Progress is a revision high-water mark in telemetry.json, so restarts
+        and failed polls never double-count or skip: a failure leaves the mark
+        untouched and the next tick re-reads the same range.
+        """
+        data = load_telemetry()
+        if not data.get("current_sprint"):
+            return
+
+        last_rev = data.get("last_commit_revision")
+
+        # First run: start counting at HEAD rather than replaying the repo's
+        # entire history into whichever sprint happens to be open.
+        if last_rev is None:
+            try:
+                head = await asyncio.to_thread(svn_head_revision)
+            except Exception as e:
+                print(f"[Telemetry] Could not read SVN head revision: {e}")
+                return
+            data["last_commit_revision"] = head
+            save_telemetry(data)
+            print(f"[Telemetry] Commit tracking baseline set to r{head}")
+            return
+
+        try:
+            entries = await asyncio.to_thread(svn_log_from, last_rev)
+        except Exception as e:
+            print(f"[Telemetry] SVN log failed (will retry from r{last_rev}): {e}")
+            return
+
+        new = [(rev, author) for rev, author in entries if rev > last_rev]
+        if not new:
+            return
+
+        # SVN usernames are account usernames — the same credential Apache
+        # authenticates against — so an author maps straight to a member.
+        by_username = {
+            m["username"].lower(): m["discord_id"]
+            for m in get_sheet_members()
+            if m.get("username") and m.get("discord_id")
+        }
+
+        # Re-read: the SVN call above yielded, and the voice/stand-up listeners
+        # write this same file.
+        data   = load_telemetry()
+        sprint = data.get("current_sprint")
+        if not sprint:
+            return
+
+        for rev, author in new:
+            discord_id = by_username.get(author.lower())
+            if not discord_id:
+                print(f"[Telemetry] r{rev}: no active account for SVN user '{author}'")
+                continue
+            ensure_user(data, sprint, discord_id)
+            data["sprints"][sprint][discord_id]["commits"] += 1
+            print(f"[Telemetry] r{rev} counted for {author}")
+
+        data["last_commit_revision"] = max(rev for rev, _ in new)
+        save_telemetry(data)
+
+    @check_svn_commits.before_loop
+    async def before_check_svn_commits(self):
+        await self.bot.wait_until_ready()
+
+    @check_svn_commits.error
+    async def check_svn_commits_error(self, error):
+        print(f"[Telemetry] check_svn_commits error: {error}")
 
     # ── Taiga completion check ──────────────────────────────────────────────────
 

@@ -21,6 +21,13 @@ REPO_SIGNUP_LINK        = _require("REPO_SIGNUP_LINK")
 #Office Hour Info
 OFFICE_HOUR_CHANNEL     = int(_require("OFFICE_HOUR_CHANNEL"))
 
+#Voice Notes Info
+# The forum channel that gets one post per meeting. 0 disables /takenotes.
+# Not _require'd so an existing deployment without these keys still boots.
+NOTES_FORUM_CHANNEL_ID  = int(os.getenv("NOTES_FORUM_CHANNEL_ID", "0"))
+# Safety net: a forgotten /stopnotes shouldn't record for eight hours.
+NOTES_MAX_MINUTES       = int(os.getenv("NOTES_MAX_MINUTES", "120"))
+
 #Taiga Info
 TAIGA_URL      = _require("TAIGA_URL")
 TAIGA_USERNAME = _require("TAIGA_USERNAME")
@@ -28,8 +35,16 @@ TAIGA_PASSWORD = _require("TAIGA_PASSWORD")
 TAIGA_PROJECT_SLUG = _require("TAIGA_PROJECT_SLUG")
 
 # Data Info
-DATA_SHEET_KEY          = _require("DATA_SHEET_KEY")
-SERVICE_ACCOUNT_FILE    = _require("SERVICE_ACCOUNT_FILE")
-WORKSHEET_NAME          = "Sheet1"
+# Member data can come from the shared SQLite database or the legacy Google
+# Sheet. "auto" prefers the database and falls back to the sheet when the
+# database is unavailable or empty; force one with "database" or "sheet".
+MEMBER_SOURCE           = os.getenv("MEMBER_SOURCE", "auto").strip().lower()
+
+# Sheet credentials are optional now — a deployment running purely on the
+# database has no reason to carry Google credentials, and _require would have
+# stopped the bot from booting without them.
+DATA_SHEET_KEY          = os.getenv("DATA_SHEET_KEY", "")
+SERVICE_ACCOUNT_FILE    = os.getenv("SERVICE_ACCOUNT_FILE", "")
+WORKSHEET_NAME          = os.getenv("WORKSHEET_NAME", "Sheet1")
 TIMEZONE                = ZoneInfo("America/New_York")
 

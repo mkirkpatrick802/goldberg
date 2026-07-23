@@ -3,6 +3,7 @@ from nextcord.ext import commands
 import json
 import os
 import random
+import time
 
 DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "bully_data.json")
 SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
@@ -61,10 +62,31 @@ RANDOM_REPLIES = [
 
 RANDOM_EMOJIS = ["💀", "🤡", "😐", "🫠", "💅", "🙃", "😬", "🧐", "🫡", "👀", "🤌", "😶"]
 
+# Name-drop reactions: fire when someone types "Goldberg" (no @ required).
+NAME_COOLDOWN_SECONDS = 30
+NAME_REPLY_CHANCE = 0.25  # otherwise he just slaps an emoji on it
+
+NAME_EMOJIS = ["👀", "🫡", "😏", "🗣️", "💅", "🧐", "🙄", "🎯", "😌", "🫰"]
+
+NAME_REPLIES = [
+    "I heard that, {mention}. 👀",
+    "Someone say my name? Better be good things, {mention}.",
+    "You're talking about me again, {mention}. Flattering. Weird. But flattering.",
+    "Ears burning. Oh wait, that's just me judging you, {mention}.",
+    "Yes, {mention}? Speak. I'm very busy pretending to work.",
+    "I felt a disturbance in the server. Someone said my name.",
+    "Careful, {mention}. Say 'Goldberg' three times and I show up at your standup.",
+    "That's my name, {mention}. Don't wear it out. Or do. I love attention.",
+    "Oh, *now* you remember I exist, {mention}?",
+    "You rang, {mention}? This better not be another bug you caused.",
+]
+
 class Bully(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.data = load_data()
+        # Per-channel timestamp of his last name-drop reaction, so he doesn't spam threads.
+        self.name_cooldowns = {}
 
     def get_user(self, user_id: str):
         if user_id not in self.data:
@@ -108,6 +130,11 @@ class Bully(commands.Cog):
             await message.channel.send(response)
             return
 
+        # Name-drop: someone typed "Goldberg" as plain text (no @). Works anywhere.
+        if "goldberg" in message.content.lower():
+            await self.handle_name_drop(message)
+            return
+
         # Random behavior in bully channels only
         if in_bully_channel:
             roll = random.random()
@@ -117,6 +144,24 @@ class Bully(commands.Cog):
             elif roll < 0.10:
                 emoji = random.choice(RANDOM_EMOJIS)
                 await message.add_reaction(emoji)
+
+    async def handle_name_drop(self, message):
+        # Rate-limit per channel so a chat full of "Goldberg" doesn't turn into spam.
+        now = time.monotonic()
+        last = self.name_cooldowns.get(message.channel.id, 0.0)
+        if now - last < NAME_COOLDOWN_SECONDS:
+            return
+        self.name_cooldowns[message.channel.id] = now
+
+        # Usually a quiet emoji, occasionally a sassy reply.
+        try:
+            if random.random() < NAME_REPLY_CHANCE:
+                reply = random.choice(NAME_REPLIES).format(mention=message.author.mention)
+                await message.channel.send(reply)
+            else:
+                await message.add_reaction(random.choice(NAME_EMOJIS))
+        except nextcord.HTTPException:
+            pass
 
 async def setup(bot):
     bot.add_cog(Bully(bot))

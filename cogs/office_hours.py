@@ -4,7 +4,7 @@ from datetime import datetime
 import random
 
 from config import OFFICE_HOUR_CHANNEL, SERVER_ID, TIMEZONE, WORKSHEET_NAME
-from utils import SCOPES, get_sheet_members, is_dev
+from utils import get_sheet_members, is_dev
 
 # ─── Goldberg's Vocabulary ─────────────────────────────────────────────────────
 
