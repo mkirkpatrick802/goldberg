@@ -119,6 +119,7 @@ class Stats:
     def __init__(self):
         self.raw = self.aead_ok = self.aead_fail = 0
         self.not_dave = self.unmapped = self.no_ratchet = 0
+        self.padded_skipped = 0
         self.dave_ok = self.dave_none = 0
         self.opus_ok = self.opus_fail = 0
 
@@ -127,6 +128,7 @@ class Stats:
         log(f"  raw audio packets    : {self.raw}")
         log(f"  transport decrypt OK : {self.aead_ok}")
         log(f"  transport decrypt FAIL: {self.aead_fail}")
+        log(f"  RTP-padded (skipped) : {self.padded_skipped}")
         log(f"  not DAVE-framed (skip): {self.not_dave}")
         log(f"  SSRC unmapped        : {self.unmapped}")
         log(f"  no ratchet for user  : {self.no_ratchet}")
@@ -186,11 +188,15 @@ def process(packets, voice, session, stats, max_decrypts=MAX_DECRYPTS, batch=DEC
             stats.aead_fail += 1
             continue
 
-        # RTP padding: trailing filler, count in the last byte.
-        if has_padding and plain:
-            pad = plain[-1]
-            if 0 < pad <= len(plain):
-                plain = plain[:-pad]
+        # RTP-padded frames reliably crash libdave on the very first decrypt
+        # (heap corruption), while unpadded frames decode fine — that is the
+        # only difference between this and the poc_dave.py run that survived.
+        # Skip them: unpadded frames alone are plenty to prove the pipeline.
+        # The real implementation will need the underlying libdave issue solved
+        # rather than dodged.
+        if has_padding:
+            stats.padded_skipped += 1
+            continue
 
         frame = plain[ext_body:] if ext_body else plain
         if len(frame) < 8:
