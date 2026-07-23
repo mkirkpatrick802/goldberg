@@ -57,7 +57,47 @@ Paste the whole `[DAVE-PoC]` output back to me.
 | group established but all ratchets `None` | Retry while someone is actively talking; if still none, strong **NO-GO**. |
 | group did **not** establish in 30s | A listener can't get into the group. Likely **NO-GO**. |
 
+## Stage 2 — actually decrypt to a WAV (`poc_decrypt.py`)
+
+Only run this after Stage 1 says **GO**. It captures a few seconds of the call,
+runs the full pipeline (transport decrypt → DAVE decrypt → Opus decode), and
+writes one WAV per speaker into `out/` that you can download and listen to.
+
+Extra requirement vs Stage 1: it decodes audio, so the server needs libopus.
+
+```bash
+sudo apt install -y libopus0
+
+# same isolated venv as Stage 1 already has the deps
+cd ~/maple-server && ./stop_maple.sh            # free the token
+
+# join the voice channel and be ready to TALK
+cd ~/maple-server/goldberg/dave_poc
+./.venv/bin/python poc_decrypt.py <voice_channel_id> 20   # capture 20 seconds
+#   ^ talk for those 20 seconds
+
+cd ~/maple-server && ./start_maple.sh           # bring the bot back
+```
+
+Then download `dave_poc/out/*.wav` (scp, or open via your file manager) and play
+them.
+
+**Reading it:** the script prints per-stage counters. If the WAV is silent or
+garbled, the counters say which layer stopped:
+
+| Counter that stays 0 / high-fail | Means |
+|---|---|
+| `raw packets received` = 0 | Not receiving on the socket at all |
+| `transport decrypt FAIL` high | The AEAD framing is wrong |
+| `SSRC unmapped` high | Speaking→user mapping didn't populate |
+| `DAVE decrypt None` high | Ratchet/DAVE layer wrong |
+| `Opus decode FAIL` high | Frame boundaries / opus issue |
+| all OK but WAV silent | audio pipeline works; investigate playback |
+
+Clear, recognisable speech in the WAV = the whole thing is proven, and the real
+in-house `/takenotes` is just wiring this into the cog.
+
 ## Cleanup
 
 Throwaway. When we're done deciding, delete the whole `dave_poc/` folder (and
-its `.venv`). Nothing else depends on it.
+its `.venv` and `out/`). Nothing else depends on it.

@@ -1,0 +1,4 @@
+# Throwaway PoC artifacts — never commit these.
+.venv/
+out/
+*.wav
