@@ -1,0 +1,4 @@
+# DAVE PoC — isolated deps. Install into a SEPARATE venv, never the bot's .venv.
+# The [voice] extra pulls PyNaCl and dave-py (the DAVE/libdave binding) alongside
+# nextcord 3.2, which is the version whose voice gateway supports DAVE.
+nextcord[voice]==3.2.0
