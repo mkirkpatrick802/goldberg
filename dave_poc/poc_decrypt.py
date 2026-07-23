@@ -25,7 +25,9 @@ Two hard-won implementation rules baked in here:
     python poc_decrypt.py <voice_channel_id> [seconds]
 """
 
+import array
 import asyncio
+import ctypes
 import logging
 import os
 import select
@@ -53,9 +55,11 @@ MAX_PACKETS = 20000
 # handing one to libdave makes it read past the buffer while parsing the
 # trailer, which corrupts the heap (`malloc(): invalid size`). Filter first.
 DAVE_MAGIC = bytes([0xFA, 0xFA])
-# Empirical libdave stability guards — see process(). 200 frames x 20ms = ~4s of
-# audio, which is plenty to prove the pipeline works.
-MAX_DECRYPTS = 200
+# 1000 frames x 20ms = ~20s, matching the capture window. The old low cap was a
+# guard against a crash we've now traced to the Opus decoder (see
+# SafeOpusDecoder), not to libdave. Decryptor recycling is kept as cheap
+# insurance while MLS epochs rotate.
+MAX_DECRYPTS = 1000
 DECRYPTOR_BATCH = 10
 
 
@@ -99,6 +103,39 @@ class ProbeVoiceClient(nextcord.VoiceClient):
             await ws.poll_event()
         self._connected.set()
         return ws
+
+
+class SafeOpusDecoder(opus.Decoder):
+    """
+    nextcord's Decoder.decode has a heap-overflow bug that this is the fix for.
+
+    It sizes the PCM output buffer using the *packet's* channel count
+    (opus_packet_get_nb_channels), but the decoder is created as STEREO and
+    libopus always writes interleaved stereo — frame_size * 2 samples. Feed it a
+    MONO packet and it allocates half the space it then writes, corrupting the
+    heap (`malloc(): invalid size (unsorted)`).
+
+    Sizing by the decoder's own channel count is correct, and is exactly what
+    nextcord already does in its packet-loss branch. Nobody upstream has hit
+    this because nextcord only ever SENDS audio — decode() is dead code there.
+    """
+
+    def decode(self, data, *, fec: bool = False) -> bytes:
+        if data is None:
+            frame_size = self._get_last_packet_duration() or self.SAMPLES_PER_FRAME
+        else:
+            frames = self.packet_get_nb_frames(data)
+            samples_per_frame = self.packet_get_samples_per_frame(data)
+            frame_size = frames * samples_per_frame
+
+        channel_count = self.CHANNELS  # the fix: decoder channels, not packet channels
+        pcm = (ctypes.c_int16 * (frame_size * channel_count))()
+        pcm_ptr = ctypes.cast(pcm, opus.c_int16_ptr)
+
+        ret = opus._lib.opus_decode(
+            self._state, data, len(data) if data else 0, pcm_ptr, frame_size, fec
+        )
+        return array.array("h", pcm[: ret * channel_count]).tobytes()
 
 
 def parse_rtp(data: bytes) -> tuple[int, int, int, bool]:
@@ -194,9 +231,11 @@ def process(packets, voice, session, stats, max_decrypts=MAX_DECRYPTS, batch=DEC
         # Skip them: unpadded frames alone are plenty to prove the pipeline.
         # The real implementation will need the underlying libdave issue solved
         # rather than dodged.
-        if has_padding:
-            stats.padded_skipped += 1
-            continue
+        if has_padding and plain:
+            pad = plain[-1]
+            if 0 < pad <= len(plain):
+                plain = plain[:-pad]
+                stats.padded_skipped += 1
 
         frame = plain[ext_body:] if ext_body else plain
         if len(frame) < 8:
@@ -234,7 +273,7 @@ def process(packets, voice, session, stats, max_decrypts=MAX_DECRYPTS, batch=DEC
         stats.dave_ok += 1
 
         if uid not in decoders:
-            decoders[uid] = opus.Decoder()
+            decoders[uid] = SafeOpusDecoder()
             pcm[uid] = bytearray()
         try:
             pcm[uid] += decoders[uid].decode(out)
