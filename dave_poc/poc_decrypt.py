@@ -1,22 +1,28 @@
 """
-DAVE proof-of-concept — Stage 2: actually decrypt a speaker to a WAV.
+DAVE PoC — Stage 2 (final): decrypt real speakers to WAV.
 
-THROWAWAY. Stage 1 proved the MLS group forms and decryption ratchets are
-reachable. This proves the rest of the pipeline end to end: receive the voice
-UDP packets, strip the transport encryption (aead_xchacha20_poly1305_rtpsize),
-strip the DAVE end-to-end layer with dave.Decryptor, Opus-decode, and write one
-WAV per speaker you can actually listen to.
+Every layer is now empirically proven; this assembles them. The recipe, each
+part confirmed by a probe rather than assumed:
 
-If a clear recording of the people talking comes out, in-house voice-receive is
-proven and we wire this into the real cog. If the audio is garbage or empty, the
-per-stage counters this prints say exactly which layer failed.
+  1. Transport AEAD unwrap (poc_framing.py, 60/60 packets):
+       AAD   = fixed RTP header + CSRCs + the 4-byte extension PREAMBLE only
+       ct    = everything after that, minus the trailing 4-byte nonce
+       nonce = those 4 bytes, at the FRONT of a 24-byte zero-padded nonce
+  2. RTP padding: if the padding bit is set, the final byte gives how many
+     trailing bytes to drop (seen as 0x07 x7 after the DAVE magic marker).
+  3. The RTP extension BODY sits inside the ciphertext -> skip it to reach the
+     DAVE frame (offset 8 in practice; the winning offset in poc_dave.py).
+  4. DAVE unwrap with THAT speaker's ratchet, routed by the SPEAKING SSRC map.
 
-Runs the same way as poc_connect.py — its OWN venv, production bot stopped, and
-this time the server needs libopus (`sudo apt install libopus0`) because we
-decode audio here.
+Two hard-won implementation rules baked in here:
+
+  * A key ratchet is MOVED into a Decryptor (nanobind relinquishes the Python
+    instance), so it is single-use — fetch a fresh one per Decryptor.
+  * libdave/mlspp is NOT thread-safe. The capture thread only does socket
+    recv(); every crypto call happens on the main thread afterwards. Doing
+    otherwise corrupted the heap (`malloc(): invalid size`).
 
     python poc_decrypt.py <voice_channel_id> [seconds]
-    # token from BOT_TOKEN env var, else ../.env ; seconds defaults to 20
 """
 
 import asyncio
@@ -37,10 +43,11 @@ from nextcord.gateway import DiscordVoiceWebSocket
 import dave
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-logging.getLogger("nextcord.voice_client").setLevel(logging.INFO)
+logging.getLogger("dave").setLevel(logging.CRITICAL)  # it logs per failed frame
 
 OUT_DIR = Path(__file__).resolve().parent / "out"
-AUDIO_PT = 0x78  # Discord voice RTP payload type (120)
+AUDIO_PT = 0x78
+MAX_PACKETS = 20000
 
 
 def log(msg: str) -> None:
@@ -57,16 +64,14 @@ def get_token() -> str:
             line = line.strip()
             if line.startswith("BOT_TOKEN") and "=" in line:
                 return line.split("=", 1)[1].strip()
-    raise SystemExit("No BOT_TOKEN found in the environment or ../.env")
+    raise SystemExit("No BOT_TOKEN found")
 
 
-CHANNEL_ID = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.getenv("POC_CHANNEL_ID", "0"))
+CHANNEL_ID = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 SECONDS = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 
 
 class ProbeVoiceClient(nextcord.VoiceClient):
-    """VoiceClient that records the SSRC -> user mapping from SPEAKING events."""
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ssrc_to_user: dict[int, int] = {}
@@ -79,8 +84,6 @@ class ProbeVoiceClient(nextcord.VoiceClient):
 
     async def connect_websocket(self) -> DiscordVoiceWebSocket:
         ws = await DiscordVoiceWebSocket.from_client(self, hook=self._ws_hook)
-        # Assign explicitly so this works regardless of whether the base
-        # connect() assigns the return value (it differs across 3.x point releases).
         self.ws = ws
         self._connected.clear()
         while ws.secret_key is None:
@@ -89,85 +92,45 @@ class ProbeVoiceClient(nextcord.VoiceClient):
         return ws
 
 
-def parse_rtp(data: bytes) -> tuple[int, int, int]:
-    """
-    Returns (ssrc, aad_len, ext_body_len) for an rtpsize packet.
-
-    Framing confirmed empirically by poc_framing.py (60/60 packets):
-    the unencrypted header — the AAD — is the fixed 12 bytes + CSRCs + the
-    4-byte extension *preamble* only. The extension *body* sits inside the
-    ciphertext, so after decrypting we skip ext_body_len bytes to reach the
-    actual payload. The nonce is the 4-byte suffix, placed at the FRONT of a
-    24-byte zero-padded nonce.
-    """
+def parse_rtp(data: bytes) -> tuple[int, int, int, bool]:
+    """(ssrc, aad_len, ext_body_len, has_padding)"""
     b0 = data[0]
-    csrc_count = b0 & 0x0F
-    has_extension = b0 & 0x10
-    base = 12 + csrc_count * 4
-    aad_len = base
-    ext_body_len = 0
-    if has_extension and len(data) >= base + 4:
+    csrc = b0 & 0x0F
+    base = 12 + csrc * 4
+    aad_len, ext_body = base, 0
+    if (b0 & 0x10) and len(data) >= base + 4:  # extension present
         ext_words = struct.unpack_from(">H", data, base + 2)[0]
         aad_len = base + 4          # AAD stops after the preamble
-        ext_body_len = ext_words * 4  # encrypted; strip post-decrypt
+        ext_body = ext_words * 4    # encrypted; skip post-decrypt
     ssrc = struct.unpack_from(">I", data, 8)[0]
-    return ssrc, aad_len, ext_body_len
+    return ssrc, aad_len, ext_body, bool(b0 & 0x20)
 
 
 class Stats:
     def __init__(self):
-        self.raw = 0
-        self.non_audio = 0
-        self.too_short = 0
-        self.aead_ok = 0
-        self.aead_fail = 0
-        self.unmapped = 0
-        self.dave_ok = 0
-        self.dave_none = 0
-        self.opus_ok = 0
-        self.opus_fail = 0
+        self.raw = self.aead_ok = self.aead_fail = 0
+        self.unmapped = self.no_ratchet = 0
+        self.dave_ok = self.dave_none = 0
+        self.opus_ok = self.opus_fail = 0
 
     def report(self):
         log("── per-stage counters ─────────────────────────")
-        log(f"  raw packets received : {self.raw}")
-        log(f"  non-audio (skipped)  : {self.non_audio}")
-        log(f"  too short (skipped)  : {self.too_short}")
+        log(f"  raw audio packets    : {self.raw}")
         log(f"  transport decrypt OK : {self.aead_ok}")
         log(f"  transport decrypt FAIL: {self.aead_fail}")
         log(f"  SSRC unmapped        : {self.unmapped}")
+        log(f"  no ratchet for user  : {self.no_ratchet}")
         log(f"  DAVE decrypt OK      : {self.dave_ok}")
         log(f"  DAVE decrypt None    : {self.dave_none}")
         log(f"  Opus decode OK       : {self.opus_ok}")
         log(f"  Opus decode FAIL     : {self.opus_fail}")
 
 
-def receive_loop(voice, session, user_ids, seconds, stats):
-    """
-    Blocking capture loop (run in an executor). Returns {user_id: pcm bytes}.
-
-    One Decryptor per user (ratchet set once). Transport-decrypt, route by SSRC
-    to a user, DAVE-decrypt, Opus-decode, accumulate PCM.
-    """
-    secret_key = bytes(voice.secret_key)
-    box = nacl.secret.Aead(secret_key)
-
-    decryptors: dict[int, dave.Decryptor] = {}
-    for uid in user_ids:
-        ratchet = session.get_key_ratchet(str(uid))
-        if ratchet is None:
-            continue
-        dec = dave.Decryptor()
-        dec.transition_to_key_ratchet(ratchet)
-        decryptors[uid] = dec
-
-    decoders: dict[int, opus.Decoder] = {}
-    pcm: dict[int, bytearray] = {}
-    ssrc_cache: dict[int, int] = {}  # ssrc -> user, once we've confirmed one
-
-    sock = voice.socket
+def capture_raw(sock, seconds):
+    """Thread body: collect bytes ONLY. No crypto — libdave isn't thread-safe."""
+    out = []
     deadline = time.monotonic() + seconds
-
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and len(out) < MAX_PACKETS:
         ready, _, _ = select.select([sock], [], [], 0.5)
         if not ready:
             continue
@@ -175,66 +138,66 @@ def receive_loop(voice, session, user_ids, seconds, stats):
             data = sock.recv(4096)
         except OSError:
             continue
+        if len(data) >= 16 and (data[1] & 0x7F) == AUDIO_PT:
+            out.append(data)
+    return out
 
+
+def process(packets, voice, session, stats):
+    """All crypto, single-threaded. Returns {user_id: pcm bytes}."""
+    box = nacl.secret.Aead(bytes(voice.secret_key))
+    decryptors: dict[int, dave.Decryptor] = {}
+    decoders: dict[int, opus.Decoder] = {}
+    pcm: dict[int, bytearray] = {}
+
+    for data in packets:
         stats.raw += 1
-        if len(data) < 16:
-            stats.too_short += 1
-            continue
-        if (data[1] & 0x7F) != AUDIO_PT:  # only RTP audio
-            stats.non_audio += 1
-            continue
-
-        ssrc, aad_len, ext_body_len = parse_rtp(data)
-        aad = data[:aad_len]
-        ciphertext = data[aad_len:-4]
-        nonce = bytes(data[-4:]) + b"\x00" * 20
+        ssrc, aad_len, ext_body, has_padding = parse_rtp(data)
 
         try:
-            plaintext = box.decrypt(bytes(ciphertext), bytes(aad), nonce)
+            plain = box.decrypt(bytes(data[aad_len:-4]), bytes(data[:aad_len]),
+                                bytes(data[-4:]) + b"\x00" * 20)
             stats.aead_ok += 1
         except Exception:
             stats.aead_fail += 1
             continue
 
-        # The encrypted region starts with the RTP extension body; the DAVE
-        # frame follows it. Keep the un-stripped version as a fallback in case
-        # that reading is wrong — cheaper than another round-trip to the server.
-        frames = [plaintext[ext_body_len:]] if ext_body_len else [plaintext]
-        if ext_body_len:
-            frames.append(plaintext)
+        # RTP padding: trailing filler, count in the last byte.
+        if has_padding and plain:
+            pad = plain[-1]
+            if 0 < pad <= len(plain):
+                plain = plain[:-pad]
 
-        # Route SSRC -> user: SPEAKING map first, then confirm-by-decrypt fallback.
-        uid = voice.ssrc_to_user.get(ssrc) or ssrc_cache.get(ssrc)
-        candidates = [uid] if uid in decryptors else list(decryptors.keys())
-        if not any(c in decryptors for c in candidates):
+        frame = plain[ext_body:] if ext_body else plain
+        if len(frame) < 8:
+            continue
+
+        uid = voice.ssrc_to_user.get(ssrc)
+        if uid is None:
             stats.unmapped += 1
             continue
 
-        opus_frame = None
-        chosen = None
-        for cand in candidates:
-            dec = decryptors.get(cand)
-            if dec is None:
+        if uid not in decryptors:
+            # Fresh ratchet per decryptor — it is moved in, not borrowed.
+            ratchet = session.get_key_ratchet(str(uid))
+            if ratchet is None:
+                stats.no_ratchet += 1
                 continue
-            for frame in frames:
-                out = dec.decrypt(dave.MediaType.audio, frame)
-                if out:
-                    opus_frame, chosen = out, cand
-                    ssrc_cache[ssrc] = cand
-                    break
-            if opus_frame is not None:
-                break
+            dec = dave.Decryptor()
+            dec.transition_to_key_ratchet(ratchet)
+            decryptors[uid] = dec
 
-        if opus_frame is None:
+        out = decryptors[uid].decrypt(dave.MediaType.audio, frame)
+        if not out:
             stats.dave_none += 1
             continue
         stats.dave_ok += 1
 
-        if chosen not in decoders:
-            decoders[chosen] = opus.Decoder()
-            pcm[chosen] = bytearray()
+        if uid not in decoders:
+            decoders[uid] = opus.Decoder()
+            pcm[uid] = bytearray()
         try:
-            pcm[chosen] += decoders[chosen].decode(opus_frame)
+            pcm[uid] += decoders[uid].decode(out)
             stats.opus_ok += 1
         except Exception:
             stats.opus_fail += 1
@@ -242,12 +205,12 @@ def receive_loop(voice, session, user_ids, seconds, stats):
     return {uid: bytes(buf) for uid, buf in pcm.items()}
 
 
-def write_wav(path: Path, pcm: bytes) -> None:
+def write_wav(path: Path, data: bytes) -> None:
     with wave.open(str(path), "wb") as w:
-        w.setnchannels(opus.Decoder.CHANNELS)      # 2
-        w.setsampwidth(2)                           # 16-bit
-        w.setframerate(opus.Decoder.SAMPLING_RATE)  # 48000
-        w.writeframes(pcm)
+        w.setnchannels(opus.Decoder.CHANNELS)
+        w.setsampwidth(2)
+        w.setframerate(opus.Decoder.SAMPLING_RATE)
+        w.writeframes(data)
 
 
 intents = nextcord.Intents.all()
@@ -262,60 +225,52 @@ async def on_ready():
                 opus._load_default()
             except Exception:
                 pass
-        log(f"Logged in as {client.user} | nextcord {nextcord.__version__} | opus_loaded={opus.is_loaded()}")
+        log(f"Logged in as {client.user} | opus_loaded={opus.is_loaded()}")
         if not opus.is_loaded():
-            log("libopus not loaded — install it (apt install libopus0). Can't decode without it.")
+            log("libopus missing — apt install libopus0")
             return
 
         channel = client.get_channel(CHANNEL_ID)
         if not isinstance(channel, nextcord.VoiceChannel):
             log(f"Channel {CHANNEL_ID} is not a voice channel I can see.")
             return
-        log(f"Target: #{channel.name} in {channel.guild.name}; capturing {SECONDS}s.")
 
         voice = await channel.connect(cls=ProbeVoiceClient, timeout=30, reconnect=False)
-        log(f"Connected. mode={voice.mode} is_connected={voice.is_connected()}")
-
         e2ee = getattr(voice, "e2ee_state", None)
         session = getattr(e2ee, "_session", None) if e2ee else None
         if session is None:
-            log("No MLS session — DAVE not active. Nothing to decrypt.")
+            log("No MLS session — DAVE inactive.")
             await voice.disconnect(force=True)
             return
-
         for _ in range(60):
             if session.has_established_group():
                 break
             await asyncio.sleep(0.5)
-        if not session.has_established_group():
-            log("MLS group never established. Aborting.")
-            await voice.disconnect(force=True)
-            return
-        log("MLS group established. Capturing — TALK NOW.")
+        log(f"MLS group established. Capturing {SECONDS}s — TALK NOW.")
 
-        user_ids = [m.id for m in channel.members if not m.bot]
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        loop = asyncio.get_running_loop()
+        packets = await loop.run_in_executor(None, capture_raw, voice.socket, SECONDS)
+        log(f"Captured {len(packets)} audio packets. Decrypting (single-threaded)...")
+        log(f"SSRC->user map: {voice.ssrc_to_user}")
 
         stats = Stats()
-        loop = asyncio.get_running_loop()
-        pcm_by_user = await loop.run_in_executor(
-            None, receive_loop, voice, session, user_ids, SECONDS, stats
-        )
-
+        pcm_by_user = process(packets, voice, session, stats)
         stats.report()
+
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
         if not pcm_by_user:
-            log(">>> No audio decoded. The counters above show which layer stopped it.")
+            log(">>> No audio decoded — see counters above.")
         else:
-            log("── WAV files written ──────────────────────────")
-            for uid, pcm in pcm_by_user.items():
+            log("── WAV files ──────────────────────────────────")
+            for uid, data in pcm_by_user.items():
                 member = channel.guild.get_member(uid)
                 name = member.display_name if member else str(uid)
                 safe = "".join(c for c in name if c.isalnum() or c in " _-").strip() or str(uid)
                 path = OUT_DIR / f"{safe}.wav"
-                write_wav(path, pcm)
-                secs = len(pcm) / (opus.Decoder.SAMPLING_RATE * opus.Decoder.CHANNELS * 2)
-                log(f"  {path}  ({secs:.1f}s of audio)")
-            log(">>> Download the WAV(s) and listen. Clear speech = GO: build the real feature.")
+                write_wav(path, data)
+                secs = len(data) / (opus.Decoder.SAMPLING_RATE * opus.Decoder.CHANNELS * 2)
+                log(f"  {path.name}  ({secs:.1f}s)")
+            log(">>> Download and listen. Clear speech = the whole pipeline is proven.")
 
         await voice.disconnect(force=True)
     finally:
