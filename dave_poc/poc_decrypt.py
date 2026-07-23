@@ -89,20 +89,29 @@ class ProbeVoiceClient(nextcord.VoiceClient):
         return ws
 
 
-def parse_rtp_header_len(data: bytes) -> int:
+def parse_rtp(data: bytes) -> tuple[int, int, int]:
     """
-    Length of the unencrypted RTP header for an rtpsize packet: the fixed 12
-    bytes, plus CSRCs, plus the header extension if present. All of it is the
-    AAD; the ciphertext begins after it.
+    Returns (ssrc, aad_len, ext_body_len) for an rtpsize packet.
+
+    Framing confirmed empirically by poc_framing.py (60/60 packets):
+    the unencrypted header — the AAD — is the fixed 12 bytes + CSRCs + the
+    4-byte extension *preamble* only. The extension *body* sits inside the
+    ciphertext, so after decrypting we skip ext_body_len bytes to reach the
+    actual payload. The nonce is the 4-byte suffix, placed at the FRONT of a
+    24-byte zero-padded nonce.
     """
     b0 = data[0]
     csrc_count = b0 & 0x0F
     has_extension = b0 & 0x10
-    hlen = 12 + csrc_count * 4
-    if has_extension and len(data) >= hlen + 4:
-        ext_words = struct.unpack_from(">H", data, hlen + 2)[0]
-        hlen += 4 + ext_words * 4
-    return hlen
+    base = 12 + csrc_count * 4
+    aad_len = base
+    ext_body_len = 0
+    if has_extension and len(data) >= base + 4:
+        ext_words = struct.unpack_from(">H", data, base + 2)[0]
+        aad_len = base + 4          # AAD stops after the preamble
+        ext_body_len = ext_words * 4  # encrypted; strip post-decrypt
+    ssrc = struct.unpack_from(">I", data, 8)[0]
+    return ssrc, aad_len, ext_body_len
 
 
 class Stats:
@@ -175,18 +184,24 @@ def receive_loop(voice, session, user_ids, seconds, stats):
             stats.non_audio += 1
             continue
 
-        hlen = parse_rtp_header_len(data)
-        ssrc = struct.unpack_from(">I", data, 8)[0]
-        aad = data[:hlen]
-        ciphertext = data[hlen:-4]
+        ssrc, aad_len, ext_body_len = parse_rtp(data)
+        aad = data[:aad_len]
+        ciphertext = data[aad_len:-4]
         nonce = bytes(data[-4:]) + b"\x00" * 20
 
         try:
-            frame = box.decrypt(bytes(ciphertext), bytes(aad), nonce)
+            plaintext = box.decrypt(bytes(ciphertext), bytes(aad), nonce)
             stats.aead_ok += 1
         except Exception:
             stats.aead_fail += 1
             continue
+
+        # The encrypted region starts with the RTP extension body; the DAVE
+        # frame follows it. Keep the un-stripped version as a fallback in case
+        # that reading is wrong — cheaper than another round-trip to the server.
+        frames = [plaintext[ext_body_len:]] if ext_body_len else [plaintext]
+        if ext_body_len:
+            frames.append(plaintext)
 
         # Route SSRC -> user: SPEAKING map first, then confirm-by-decrypt fallback.
         uid = voice.ssrc_to_user.get(ssrc) or ssrc_cache.get(ssrc)
@@ -201,10 +216,13 @@ def receive_loop(voice, session, user_ids, seconds, stats):
             dec = decryptors.get(cand)
             if dec is None:
                 continue
-            out = dec.decrypt(dave.MediaType.audio, frame)
-            if out:
-                opus_frame, chosen = out, cand
-                ssrc_cache[ssrc] = cand
+            for frame in frames:
+                out = dec.decrypt(dave.MediaType.audio, frame)
+                if out:
+                    opus_frame, chosen = out, cand
+                    ssrc_cache[ssrc] = cand
+                    break
+            if opus_frame is not None:
                 break
 
         if opus_frame is None:
