@@ -37,6 +37,18 @@ NO_SESSION = [
     "Nothing to stop. I've been sitting here doing nothing, same as always.",
 ]
 
+ABANDONED = [
+    "Everyone left and nobody stopped me. I'm not going to sit here narrating an empty room.",
+    "You all wandered off. I'll take the hint — and the notes.",
+    "Last one out didn't hit `/stopnotes`. Shocking. Wrapping up myself.",
+    "The meeting appears to be over, judging by the complete absence of humans.",
+]
+
+# How long the channel must stay empty before we call it. Long enough to survive
+# a reconnect or someone hopping channels, short enough not to record an empty
+# room for an hour.
+ALONE_GRACE_SECONDS = 60
+
 # ─── Cog ───────────────────────────────────────────────────────────────────────
 
 
@@ -50,9 +62,11 @@ class Notes(commands.Cog):
         self.sessions: dict[int, recorder.RecordingSession] = {}
         self.timers: dict[int, asyncio.Task] = {}
         self.notify_channels: dict[int, int] = {}
+        # Pending "everyone left" countdowns, one per guild.
+        self.alone_timers: dict[int, asyncio.Task] = {}
 
     def cog_unload(self):
-        for task in self.timers.values():
+        for task in (*self.timers.values(), *self.alone_timers.values()):
             task.cancel()
 
     # ── /takenotes ──────────────────────────────────────────────────────────────
@@ -166,6 +180,74 @@ class Notes(commands.Cog):
 
         await self._finish(guild_id, interaction.channel)
 
+    # ── Failsafes: nobody left to record ────────────────────────────────────────
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        """
+        Stop recording when there's no one left to record.
+
+        Two cases: everyone wandered off and left the bot talking to itself, or
+        the bot got disconnected/dragged out of the channel. Either way there's
+        no point burning the full NOTES_MAX_MINUTES on an empty room.
+        """
+        session = self.sessions.get(member.guild.id)
+        if session is None:
+            return
+        guild_id = member.guild.id
+
+        # The bot itself was disconnected, kicked, or moved elsewhere.
+        if self.bot.user is not None and member.id == self.bot.user.id:
+            still_here = after.channel is not None and after.channel.id == session.channel_id
+            if not still_here:
+                channel = self._notify_channel_for(guild_id)
+                if channel is not None:
+                    await channel.send(
+                        "I got yanked out of the voice channel mid-meeting. "
+                        "Salvaging what I recorded."
+                    )
+                    await self._finish(guild_id, channel)
+            return
+
+        # Someone else moved. Are any humans left in the channel we're recording?
+        voice_channel = self.bot.get_channel(session.channel_id)
+        humans = [
+            m for m in getattr(voice_channel, "members", []) if not m.bot
+        ] if voice_channel is not None else []
+
+        pending = self.alone_timers.get(guild_id)
+        if humans:
+            # Someone's still there (or came back) — call off the countdown.
+            if pending is not None and not pending.done():
+                pending.cancel()
+            self.alone_timers.pop(guild_id, None)
+        elif pending is None or pending.done():
+            self.alone_timers[guild_id] = asyncio.create_task(self._alone_check(guild_id))
+
+    async def _alone_check(self, guild_id: int) -> None:
+        """After the grace period, if still alone, wrap the meeting up."""
+        try:
+            await asyncio.sleep(ALONE_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        session = self.sessions.get(guild_id)
+        if session is None:
+            return
+
+        voice_channel = self.bot.get_channel(session.channel_id)
+        if voice_channel is not None and any(not m.bot for m in voice_channel.members):
+            return  # somebody came back during the grace period
+
+        channel = self._notify_channel_for(guild_id)
+        if channel is None:
+            return
+        await channel.send(random.choice(ABANDONED))
+        await self._finish(guild_id, channel)
+
+    def _notify_channel_for(self, guild_id: int):
+        channel_id = self.notify_channels.get(guild_id)
+        return self.bot.get_channel(channel_id) if channel_id else None
+
     # ── Shared finish path ──────────────────────────────────────────────────────
     async def _finish(self, guild_id: int, notify_channel) -> None:
         """
@@ -178,9 +260,15 @@ class Notes(commands.Cog):
         if session is None:
             return
 
-        timer = self.timers.pop(guild_id, None)
-        if timer is not None and not timer.done():
-            timer.cancel()
+        # Cancel the pending timers — but never the task we're running inside.
+        # _auto_stop and _alone_check both call _finish, and cancelling the
+        # current task would raise CancelledError partway through the wrap-up,
+        # losing the meeting we just recorded.
+        current = asyncio.current_task()
+        for registry in (self.timers, self.alone_timers):
+            task = registry.pop(guild_id, None)
+            if task is not None and task is not current and not task.done():
+                task.cancel()
         self.notify_channels.pop(guild_id, None)
 
         try:
