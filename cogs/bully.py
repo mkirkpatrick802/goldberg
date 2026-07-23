@@ -163,5 +163,5 @@ class Bully(commands.Cog):
         except nextcord.HTTPException:
             pass
 
-async def setup(bot):
+def setup(bot):
     bot.add_cog(Bully(bot))

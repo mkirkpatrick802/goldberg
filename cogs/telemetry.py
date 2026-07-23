@@ -510,5 +510,5 @@ class Telemetry(commands.Cog):
         print(f"[Telemetry] taiga_completion_check error: {error}")
 
 
-async def setup(bot):
+def setup(bot):
     bot.add_cog(Telemetry(bot))

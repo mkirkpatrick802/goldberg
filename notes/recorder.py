@@ -1,255 +1,434 @@
 """
-Live voice capture via nextcord-ext-listening.
+Live voice capture over Discord's DAVE end-to-end encryption.
 
-Unlike the rest of the notes package this module *does* need the voice stack
-(PyNaCl, opus, nextcord). It's imported only by the cog, so the offline pipeline
-and its CLI harness stay runnable on a machine with none of that installed.
+Discord now requires DAVE (MLS-based E2EE) on voice channels — a client without
+it is rejected with voice close code 4017 — and no Python Discord library
+implements the *receive* half. This module does, using Discord's own libdave via
+dave-py. The recipe below was established empirically in dave_poc/ (see
+`docs/DAVE.md`); every step is load-bearing, so change it only with evidence.
 
-The library writes one raw PCM file per SSRC and resolves each to a Member, so
-"one audio stream per speaker" falls out naturally — which is what lets the
-pipeline label the transcript and interleave everyone onto one timeline.
+Pipeline per packet:
+    RTP  ->  transport AEAD unwrap  ->  DAVE unwrap  ->  Opus decode  ->  WAV
+
+Design constraints, each learned the hard way:
+
+  * libdave/mlspp is NOT thread-safe. The capture thread only does recv() and
+    hands bytes to a queue; every crypto call happens on the event loop.
+  * A dave key ratchet is MOVED into a Decryptor (nanobind relinquishes the
+    Python object), so it is single-use. We fetch a fresh one periodically,
+    which also keeps up with MLS re-keying when people join or leave.
+  * nextcord's Opus decoder overflows the heap on mono packets — see
+    SafeOpusDecoder.
+  * Audio is written to disk continuously and downsampled on the way in. A
+    two-hour meeting at 48kHz stereo would be ~690MB *per speaker*; at 16kHz
+    mono (what Whisper wants anyway) it's ~115MB.
+  * Every speaker's file shares one clock, with gaps padded by silence, so
+    notes/pipeline.py can interleave segments by timestamp and rebuild the
+    conversation in the right order.
 """
 
+import array
 import asyncio
-import shutil
+import ctypes
+import queue
+import select
+import struct
+import threading
+import time
 import wave
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from nextcord.ext.listening import AudioFile, AudioFileSink, AudioProcessPool, VoiceClient
+import nacl.secret
+import nextcord
+import nextcord.opus as opus
+from nextcord.gateway import DiscordVoiceWebSocket
+
+import dave
 
 try:
-    import audioop  # stdlib < 3.13; the audioop-lts wheel provides it on 3.13+
-except ImportError:  # pragma: no cover - only if audioop-lts is missing
+    import audioop  # stdlib <3.13; the audioop-lts wheel provides it on 3.13+
+except ImportError:  # pragma: no cover
     audioop = None
 
-# What Discord's opus decoder hands us: 48kHz, stereo, 16-bit signed.
-SOURCE_RATE = 48000
-SOURCE_CHANNELS = 2
+# ─── Wire format ──────────────────────────────────────────────────────────────
+AUDIO_PT = 0x78                    # Discord voice RTP payload type
+DAVE_MAGIC = bytes([0xFA, 0xFA])   # a real DAVE frame ends with this
+
+# ─── Audio format ─────────────────────────────────────────────────────────────
+SOURCE_RATE, SOURCE_CHANNELS = 48000, 2   # what Opus decodes to
+TARGET_RATE, TARGET_CHANNELS = 16000, 1   # what we store (Whisper resamples anyway)
 SAMPLE_WIDTH = 2
+TARGET_BYTES_PER_SECOND = TARGET_RATE * TARGET_CHANNELS * SAMPLE_WIDTH
+SILENCE = b"\x00"
 
-# What we write. Whisper resamples to 16kHz mono internally anyway, so doing it
-# here costs nothing in accuracy and saves a lot of disk: an hour of 48kHz
-# stereo is ~690MB per speaker, versus ~115MB at 16kHz mono.
-TARGET_RATE = 16000
-
-_READ_CHUNK = SOURCE_RATE * SOURCE_CHANNELS * SAMPLE_WIDTH  # one second
-
-_process_pool: AudioProcessPool | None = None
+# Re-create each Decryptor after this many frames, which re-fetches the ratchet
+# and so follows MLS re-keys.
+DECRYPTOR_BATCH = 50
+# How often the event loop drains the capture queue.
+DRAIN_INTERVAL = 0.25
 
 
 def _log(msg: str) -> None:
-    """Print with an immediate flush so it can't get stuck in the stdout buffer."""
     print(f"[Notes] {msg}", flush=True)
+
+
+class DaveVoiceClient(nextcord.VoiceClient):
+    """VoiceClient that records the SSRC -> user mapping from SPEAKING events."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ssrc_to_user: dict[int, int] = {}
+
+    async def _ws_hook(self, ws, msg) -> None:
+        if msg.get("op") == DiscordVoiceWebSocket.SPEAKING:
+            d = msg.get("d", {})
+            if d.get("ssrc") is not None and d.get("user_id"):
+                self.ssrc_to_user[int(d["ssrc"])] = int(d["user_id"])
+
+    async def connect_websocket(self) -> DiscordVoiceWebSocket:
+        ws = await DiscordVoiceWebSocket.from_client(self, hook=self._ws_hook)
+        # Assign explicitly: whether the base connect() assigns the return value
+        # differs across nextcord 3.x point releases.
+        self.ws = ws
+        self._connected.clear()
+        while ws.secret_key is None:
+            await ws.poll_event()
+        self._connected.set()
+        return ws
+
+
+class SafeOpusDecoder(opus.Decoder):
+    """
+    Fixes a heap overflow in nextcord's Decoder.decode.
+
+    It sizes the PCM buffer by the *packet's* channel count, but the decoder is
+    created STEREO and libopus always writes interleaved stereo. A mono packet
+    therefore gets half the space libopus then writes, corrupting the heap
+    (`malloc(): invalid size`). Sizing by the decoder's own channel count is
+    correct — nextcord already does exactly that in its packet-loss branch.
+    Unnoticed upstream because nextcord only ever sends audio; decode() is dead
+    code there.
+    """
+
+    def decode(self, data, *, fec: bool = False) -> bytes:
+        if data is None:
+            frame_size = self._get_last_packet_duration() or self.SAMPLES_PER_FRAME
+        else:
+            frame_size = self.packet_get_nb_frames(data) * self.packet_get_samples_per_frame(data)
+
+        channels = self.CHANNELS  # the fix
+        pcm = (ctypes.c_int16 * (frame_size * channels))()
+        ret = opus._lib.opus_decode(
+            self._state, data, len(data) if data else 0,
+            ctypes.cast(pcm, opus.c_int16_ptr), frame_size, fec,
+        )
+        return array.array("h", pcm[: ret * channels]).tobytes()
+
+
+def _parse_rtp(data: bytes) -> tuple[int, int, int, bool]:
+    """
+    (ssrc, aad_len, ext_body_len, has_padding) for an rtpsize packet.
+
+    The unencrypted header — the AEAD's additional authenticated data — is the
+    fixed 12 bytes + CSRCs + the 4-byte extension *preamble* only. The extension
+    body lives inside the ciphertext, so it is skipped after decryption.
+    """
+    b0 = data[0]
+    base = 12 + (b0 & 0x0F) * 4
+    aad_len, ext_body = base, 0
+    if (b0 & 0x10) and len(data) >= base + 4:
+        ext_words = struct.unpack_from(">H", data, base + 2)[0]
+        aad_len = base + 4
+        ext_body = ext_words * 4
+    ssrc = struct.unpack_from(">I", data, 8)[0]
+    return ssrc, aad_len, ext_body, bool(b0 & 0x20)
+
+
+class _SpeakerTrack:
+    """One speaker's output: decoder, resampler state, and an open WAV file."""
+
+    def __init__(self, user_id: int, out_dir: Path):
+        self.user_id = user_id
+        self.path = out_dir / f"user-{user_id}.wav"
+        self.decoder = SafeOpusDecoder()
+        self._resample_state = None
+        self._written = 0  # bytes of 16kHz mono audio on disk
+        self._wav = wave.open(str(self.path), "wb")
+        self._wav.setnchannels(TARGET_CHANNELS)
+        self._wav.setsampwidth(SAMPLE_WIDTH)
+        self._wav.setframerate(TARGET_RATE)
+
+    def write(self, opus_frame: bytes, arrival: float) -> None:
+        """Decode, downmix to 16kHz mono, and place it at its arrival time."""
+        pcm = self.decoder.decode(opus_frame)  # 48kHz stereo
+        if audioop is not None:
+            mono = audioop.tomono(pcm, SAMPLE_WIDTH, 0.5, 0.5)
+            pcm, self._resample_state = audioop.ratecv(
+                mono, SAMPLE_WIDTH, 1, SOURCE_RATE, TARGET_RATE, self._resample_state
+            )
+
+        # Pad the gap since this speaker last spoke, so every track shares one
+        # clock and the transcript can be interleaved correctly.
+        offset = int(arrival * TARGET_BYTES_PER_SECOND)
+        offset -= offset % SAMPLE_WIDTH
+        if offset > self._written:
+            self._wav.writeframes(SILENCE * (offset - self._written))
+            self._written = offset
+
+        self._wav.writeframes(pcm)
+        self._written += len(pcm)
+
+    def close(self, pad_to: int = 0) -> None:
+        try:
+            if pad_to > self._written:
+                self._wav.writeframes(SILENCE * (pad_to - self._written))
+                self._written = pad_to
+            self._wav.close()
+        except Exception as e:
+            _log(f"Failed closing track for {self.user_id}: {e}")
+
+    @property
+    def written(self) -> int:
+        return self._written
 
 
 @dataclass
 class RecordingSession:
     """One in-progress recording. Owned by the cog, one per guild."""
-    voice_client: VoiceClient
-    sink: AudioFileSink
+    voice_client: DaveVoiceClient
     out_dir: Path
     channel_id: int
     title: str
     started_at: datetime
-    # Everyone seen in the channel while recording. Snapshotted at start and
-    # topped up at stop, so someone who joined late still counts as an attendee.
     attendee_ids: set[int] = field(default_factory=set)
 
+    # internals
+    packets: "queue.Queue" = field(default_factory=queue.Queue)
+    tracks: dict[int, _SpeakerTrack] = field(default_factory=dict)
+    stop_flag: threading.Event = field(default_factory=threading.Event)
+    capture_thread: threading.Thread | None = None
+    drain_task: asyncio.Task | None = None
+    decryptors: dict[int, dave.Decryptor] = field(default_factory=dict)
+    frames_seen: dict[int, int] = field(default_factory=dict)
+    started_monotonic: float = 0.0
+    dropped: int = 0
 
-def _get_process_pool() -> AudioProcessPool:
+
+def _capture_loop(session: RecordingSession) -> None:
     """
-    One decode pool for the lifetime of the bot.
+    Thread body: recv audio packets and queue them. Nothing else.
 
-    The pool spawns worker processes, so building a fresh one per meeting would
-    leak them. Note this is why bot.py's `if __name__ == "__main__"` guard
-    matters — without it, multiprocessing re-imports the module and the event
-    loop dies.
+    No crypto here — libdave is not thread-safe, so decryption happens on the
+    event loop.
     """
-    global _process_pool
-    if _process_pool is None:
-        _process_pool = AudioProcessPool(max_processes=2)
-    return _process_pool
+    sock = session.voice_client.socket
+    while not session.stop_flag.is_set():
+        try:
+            ready, _, _ = select.select([sock], [], [], 0.5)
+        except Exception:
+            break
+        if not ready:
+            continue
+        try:
+            data = sock.recv(4096)
+        except OSError:
+            continue
+        if len(data) >= 16 and (data[1] & 0x7F) == AUDIO_PT:
+            session.packets.put((time.monotonic() - session.started_monotonic, data))
 
 
-def _pcm_to_wav(pcm_path: Path, wav_path: Path) -> None:
-    """
-    Convert raw PCM to a WAV whisper can read, downmixed to 16kHz mono.
+def _decrypt_packet(session: RecordingSession, arrival: float, data: bytes):
+    """Transport + DAVE unwrap. Returns (user_id, opus_frame) or None."""
+    voice = session.voice_client
+    if not voice.secret_key:
+        return None
 
-    Deliberately not using the library's WaveAudioFile.convert(), which shells
-    out to ffmpeg — this keeps the whole feature free of external binaries.
-    Streamed in chunks because a long meeting's PCM runs to gigabytes.
-    """
-    if audioop is None:
-        # No resampler available: write the source format through unchanged.
-        # Bigger files, identical transcription results.
-        with open(pcm_path, "rb") as src, wave.open(str(wav_path), "wb") as dst:
-            dst.setnchannels(SOURCE_CHANNELS)
-            dst.setsampwidth(SAMPLE_WIDTH)
-            dst.setframerate(SOURCE_RATE)
-            shutil.copyfileobj(src, dst._file, _READ_CHUNK)  # type: ignore[attr-defined]
-        return
+    ssrc, aad_len, ext_body, has_padding = _parse_rtp(data)
+    try:
+        plain = nacl.secret.Aead(bytes(voice.secret_key)).decrypt(
+            bytes(data[aad_len:-4]), bytes(data[:aad_len]),
+            bytes(data[-4:]) + SILENCE * 20,
+        )
+    except Exception:
+        return None
 
-    frame_size = SOURCE_CHANNELS * SAMPLE_WIDTH
-    state = None
+    if has_padding and plain:
+        pad = plain[-1]
+        if 0 < pad <= len(plain):
+            plain = plain[:-pad]
 
-    with open(pcm_path, "rb") as src, wave.open(str(wav_path), "wb") as dst:
-        dst.setnchannels(1)
-        dst.setsampwidth(SAMPLE_WIDTH)
-        dst.setframerate(TARGET_RATE)
+    frame = plain[ext_body:] if ext_body else plain
+    # Silence/comfort-noise frames aren't DAVE frames; handing one to libdave
+    # makes it read past its buffer.
+    if len(frame) < 8 or not frame.endswith(DAVE_MAGIC):
+        return None
 
-        while chunk := src.read(_READ_CHUNK):
-            # A truncated final frame would corrupt the conversion.
-            usable = len(chunk) - (len(chunk) % frame_size)
-            if usable <= 0:
-                break
-            mono = audioop.tomono(chunk[:usable], SAMPLE_WIDTH, 0.5, 0.5)
-            resampled, state = audioop.ratecv(
-                mono, SAMPLE_WIDTH, 1, SOURCE_RATE, TARGET_RATE, state
-            )
-            dst.writeframes(resampled)
+    user_id = voice.ssrc_to_user.get(ssrc)
+    if user_id is None:
+        return None
+
+    seen = session.frames_seen.get(user_id, 0)
+    if user_id not in session.decryptors or seen % DECRYPTOR_BATCH == 0:
+        e2ee = getattr(voice, "e2ee_state", None)
+        mls = getattr(e2ee, "_session", None) if e2ee else None
+        if mls is None:
+            return None
+        ratchet = mls.get_key_ratchet(str(user_id))
+        if ratchet is None:
+            return None
+        decryptor = dave.Decryptor()
+        decryptor.transition_to_key_ratchet(ratchet)
+        session.decryptors[user_id] = decryptor
+    session.frames_seen[user_id] = seen + 1
+
+    opus_frame = session.decryptors[user_id].decrypt(dave.MediaType.audio, frame)
+    return (user_id, opus_frame) if opus_frame else None
 
 
-def _label_for(audio_file: AudioFile, taken: set[str]) -> str:
-    """
-    A human name for a speaker's stream, unique within this meeting.
+def _drain(session: RecordingSession, budget: int = 400) -> None:
+    """Process queued packets on the event loop, bounded so we never hog it."""
+    for _ in range(budget):
+        try:
+            arrival, data = session.packets.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            result = _decrypt_packet(session, arrival, data)
+            if result is None:
+                continue
+            user_id, opus_frame = result
+            track = session.tracks.get(user_id)
+            if track is None:
+                track = _SpeakerTrack(user_id, session.out_dir)
+                session.tracks[user_id] = track
+            track.write(opus_frame, arrival)
+        except Exception as e:
+            session.dropped += 1
+            if session.dropped in (1, 100, 1000):
+                _log(f"Dropped a packet ({session.dropped} so far): {type(e).__name__}: {e}")
 
-    The library resolves most SSRCs to a Member, but not always — an unresolved
-    stream still holds real speech, so it gets a placeholder rather than being
-    dropped.
-    """
-    user = audio_file.user
-    name = getattr(user, "display_name", None) or getattr(user, "name", None)
-    if not name:
-        name = f"Unknown speaker ({audio_file.ssrc})"
 
-    # Two people can share a display name; the transcript needs them separate.
-    label = name
-    suffix = 2
-    while label in taken:
-        label = f"{name} ({suffix})"
-        suffix += 1
-    taken.add(label)
-    return label
+async def _drain_loop(session: RecordingSession) -> None:
+    try:
+        while not session.stop_flag.is_set():
+            _drain(session)
+            await asyncio.sleep(DRAIN_INTERVAL)
+    except asyncio.CancelledError:
+        pass
 
 
 async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
-    """Join the given voice channel and begin recording one stream per speaker."""
+    """Join the channel and begin recording one track per speaker."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    guild = voice_channel.guild
+    if not opus.is_loaded():
+        try:
+            opus._load_default()
+        except Exception:
+            pass
+    if not opus.is_loaded():
+        raise RuntimeError("libopus is not available — install libopus0.")
 
-    # A previous attempt that half-connected can leave a dangling voice client on
-    # the guild. connect(cls=...) then reuses or collides with that stale, often
-    # already-disconnected object, and listen() reports "not connected". Clear it
-    # first so every /takenotes starts from a clean slate.
+    guild = voice_channel.guild
     existing = guild.voice_client
     if existing is not None:
-        _log(
-            f"Guild {guild.id} already had a voice client "
-            f"(connected={existing.is_connected()}); disconnecting it first."
-        )
+        # A previous half-connected attempt leaves a dangling client that
+        # collides with the new one.
         try:
             await existing.disconnect(force=True)
         except Exception as e:
-            _log(f"Couldn't clear the stale voice client: {e}")
+            _log(f"Couldn't clear a stale voice client: {e}")
 
-    _log(f"Connecting to voice channel {voice_channel.id}...")
-    voice_client: VoiceClient = await voice_channel.connect(cls=VoiceClient)
-    _log(
-        f"connect() returned {type(voice_client).__name__}; "
-        f"is_connected={voice_client.is_connected()}"
-    )
+    voice: DaveVoiceClient = await voice_channel.connect(cls=DaveVoiceClient, timeout=60)
+    if not voice.is_connected():
+        raise RuntimeError("Joined the channel but the voice connection never became ready.")
 
-    # connect() should return already-connected, but if the handshake is still
-    # settling, poll briefly rather than charging into a listen() that throws.
-    for _ in range(50):  # up to ~5s
-        if voice_client.is_connected():
-            break
-        await asyncio.sleep(0.1)
-
-    if not voice_client.is_connected():
-        # Surface the real state instead of the opaque "Not connected to voice".
-        ws = getattr(voice_client, "ws", None)
-        _log("Still not connected after waiting 5s. State dump:")
-        _log(f"    ws            = {ws!r}")
-        _log(f"    ws.secret_key = {getattr(ws, 'secret_key', '<no ws>')!r}")
-        _log(f"    endpoint      = {getattr(voice_client, 'endpoint', '?')!r}")
-        _log(f"    channel       = {getattr(voice_client, 'channel', '?')!r}")
-        _log(f"    _receiver     = {getattr(voice_client, '_receiver', '?')!r}")
-        try:
-            await voice_client.disconnect(force=True)
-        except Exception:
-            pass
+    e2ee = getattr(voice, "e2ee_state", None)
+    mls = getattr(e2ee, "_session", None) if e2ee else None
+    if mls is None:
+        await voice.disconnect(force=True)
         raise RuntimeError(
-            "Joined the channel but the voice connection never became ready — "
-            "the handshake didn't complete. This is a voice-stack problem, not a "
-            "permissions or command problem."
+            "This connection has no DAVE session. The bot needs nextcord 3.2+ "
+            "with dave-py installed."
         )
+    for _ in range(60):
+        if mls.has_established_group():
+            break
+        await asyncio.sleep(0.5)
+    if not mls.has_established_group():
+        await voice.disconnect(force=True)
+        raise RuntimeError("The DAVE encryption group never formed; cannot decode audio.")
 
-    sink = AudioFileSink(AudioFile, output_dir=str(out_dir))
-
-    _log("Connected. Starting listener...")
-    voice_client.listen(sink, _get_process_pool())
-    _log("Listening.")
-
-    return RecordingSession(
-        voice_client=voice_client,
-        sink=sink,
+    session = RecordingSession(
+        voice_client=voice,
         out_dir=out_dir,
         channel_id=voice_channel.id,
         title=title,
         started_at=datetime.now(),
         attendee_ids={m.id for m in voice_channel.members if not m.bot},
+        started_monotonic=time.monotonic(),
     )
+    session.capture_thread = threading.Thread(
+        target=_capture_loop, args=(session,), daemon=True
+    )
+    session.capture_thread.start()
+    session.drain_task = asyncio.create_task(_drain_loop(session))
+
+    _log(f"Recording '{title}' in #{voice_channel.name}")
+    return session
 
 
 async def stop(session: RecordingSession) -> dict[str, Path]:
     """
     Stop recording, leave the channel, and return {speaker label: wav path}.
 
-    Safe to call even if parts of the session already fell over — the cog calls
-    this from a finally block, so it must not raise on a half-dead session.
+    Safe on a half-dead session — the cog calls this from a finally block.
     """
-    try:
-        session.voice_client.stop_listening()
-    except Exception as e:
-        print(f"[Notes] stop_listening failed: {e}")
+    session.stop_flag.set()
 
-    # Flushes buffered frames and closes every PCM file. Must happen before we
-    # read them, or the tail of the meeting is missing.
-    try:
-        session.sink.cleanup()
-    except Exception as e:
-        print(f"[Notes] sink cleanup failed: {e}")
+    if session.capture_thread is not None:
+        session.capture_thread.join(timeout=5)
+    if session.drain_task is not None:
+        session.drain_task.cancel()
+        try:
+            await session.drain_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # Anything still queued.
+    _drain(session, budget=100000)
 
     try:
-        await session.voice_client.disconnect()
+        await session.voice_client.disconnect(force=True)
     except Exception as e:
-        print(f"[Notes] disconnect failed: {e}")
+        _log(f"Disconnect failed: {e}")
+
+    # Pad every track to the same length so they stay aligned.
+    longest = max((t.written for t in session.tracks.values()), default=0)
+    guild = getattr(session.voice_client, "guild", None)
 
     sources: dict[str, Path] = {}
     taken: set[str] = set()
-
-    for audio_file in session.sink.output_files.values():
-        pcm_path = Path(audio_file.path)
-        if not pcm_path.is_file() or pcm_path.stat().st_size == 0:
+    for user_id, track in session.tracks.items():
+        track.close(pad_to=longest)
+        if track.written <= 0 or not track.path.is_file():
             continue
 
-        user = audio_file.user
-        if user is not None and getattr(user, "id", None):
-            session.attendee_ids.add(user.id)
+        member = guild.get_member(user_id) if guild else None
+        name = getattr(member, "display_name", None) or f"User {user_id}"
+        label, suffix = name, 2
+        while label in taken:  # two people can share a display name
+            label = f"{name} ({suffix})"
+            suffix += 1
+        taken.add(label)
 
-        label = _label_for(audio_file, taken)
-        wav_path = pcm_path.with_suffix(".wav")
-        try:
-            _pcm_to_wav(pcm_path, wav_path)
-        except Exception as e:
-            print(f"[Notes] Failed converting {pcm_path.name}: {e}")
-            continue
+        session.attendee_ids.add(user_id)
+        sources[label] = track.path
 
-        sources[label] = wav_path
-
+    secs = longest / TARGET_BYTES_PER_SECOND if longest else 0
+    _log(f"Recorded {len(sources)} speaker(s), {secs:.0f}s"
+         + (f", dropped {session.dropped} packets" if session.dropped else ""))
     return sources

@@ -209,5 +209,5 @@ class SvnCommits(commands.Cog):
             self.backoff_seconds = min(self.backoff_seconds * 2, 300)
 
 
-async def setup(bot):
+def setup(bot):
     bot.add_cog(SvnCommits(bot))

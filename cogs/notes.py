@@ -1,6 +1,7 @@
 import asyncio
 import random
 import shutil
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -115,8 +116,6 @@ class Notes(commands.Cog):
             # Log the full traceback to goldberg.log — the Discord message only
             # shows the final line, which for voice failures is uselessly vague.
             print(f"[Notes] /takenotes failed to start recording: {e!r}")
-            import traceback
-
             traceback.print_exc()
             await interaction.followup.send(
                 f"Couldn't start recording. Something's broken.\n```{e}```"
@@ -218,8 +217,6 @@ class Notes(commands.Cog):
 
         except Exception as e:
             print(f"[Notes] Failed to produce notes for guild {guild_id}: {e}")
-            import traceback
-
             traceback.print_exc()
             try:
                 await notify_channel.send(

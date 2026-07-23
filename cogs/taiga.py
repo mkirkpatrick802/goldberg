@@ -565,5 +565,5 @@ class Taiga(commands.Cog):
             allowed_mentions=nextcord.AllowedMentions.none()
         )
 
-async def setup(bot):
+def setup(bot):
     bot.add_cog(Taiga(bot))

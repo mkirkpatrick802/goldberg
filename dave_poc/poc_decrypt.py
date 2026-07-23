@@ -307,6 +307,19 @@ async def on_ready():
         channel = client.get_channel(CHANNEL_ID)
         if not isinstance(channel, nextcord.VoiceChannel):
             log(f"Channel {CHANNEL_ID} is not a voice channel I can see.")
+            log("Auto-created ('join to create') channels are deleted when empty,")
+            log("so an ID from an earlier session may no longer exist. Voice")
+            log("channels I can currently see, newest last:")
+            found = False
+            for guild in client.guilds:
+                for vc in guild.voice_channels:
+                    found = True
+                    occupants = [m.display_name for m in vc.members if not m.bot]
+                    who = f"  <- {occupants}" if occupants else ""
+                    log(f"    {vc.id}  #{vc.name}  ({guild.name}){who}")
+            if not found:
+                log("    (none — is the bot in the server?)")
+            log("Pick the one you're sitting in and pass that ID.")
             return
 
         voice = await channel.connect(cls=ProbeVoiceClient, timeout=30, reconnect=False)

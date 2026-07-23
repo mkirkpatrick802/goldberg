@@ -257,5 +257,5 @@ class OfficeHours(commands.Cog):
 
 # ─── Setup ─────────────────────────────────────────────────────────────────────
 
-async def setup(bot: commands.Bot):
+def setup(bot: commands.Bot):
     bot.add_cog(OfficeHours(bot))

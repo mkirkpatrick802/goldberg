@@ -31,5 +31,5 @@ class RepoCommands(commands.Cog):
         )
 
 
-async def setup(bot):
+def setup(bot):
     bot.add_cog(RepoCommands(bot))
