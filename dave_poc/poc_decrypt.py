@@ -48,6 +48,11 @@ logging.getLogger("dave").setLevel(logging.CRITICAL)  # it logs per failed frame
 OUT_DIR = Path(__file__).resolve().parent / "out"
 AUDIO_PT = 0x78
 MAX_PACKETS = 20000
+# A DAVE-encrypted frame ends with this 2-byte magic marker. Anything else —
+# notably Discord's ~11-byte Opus silence frames — is NOT a DAVE frame, and
+# handing one to libdave makes it read past the buffer while parsing the
+# trailer, which corrupts the heap (`malloc(): invalid size`). Filter first.
+DAVE_MAGIC = bytes([0xFA, 0xFA])
 
 
 def log(msg: str) -> None:
@@ -109,7 +114,7 @@ def parse_rtp(data: bytes) -> tuple[int, int, int, bool]:
 class Stats:
     def __init__(self):
         self.raw = self.aead_ok = self.aead_fail = 0
-        self.unmapped = self.no_ratchet = 0
+        self.not_dave = self.unmapped = self.no_ratchet = 0
         self.dave_ok = self.dave_none = 0
         self.opus_ok = self.opus_fail = 0
 
@@ -118,6 +123,7 @@ class Stats:
         log(f"  raw audio packets    : {self.raw}")
         log(f"  transport decrypt OK : {self.aead_ok}")
         log(f"  transport decrypt FAIL: {self.aead_fail}")
+        log(f"  not DAVE-framed (skip): {self.not_dave}")
         log(f"  SSRC unmapped        : {self.unmapped}")
         log(f"  no ratchet for user  : {self.no_ratchet}")
         log(f"  DAVE decrypt OK      : {self.dave_ok}")
@@ -170,6 +176,11 @@ def process(packets, voice, session, stats):
 
         frame = plain[ext_body:] if ext_body else plain
         if len(frame) < 8:
+            continue
+
+        # Never hand a non-DAVE frame to libdave — it corrupts the heap.
+        if not frame.endswith(DAVE_MAGIC):
+            stats.not_dave += 1
             continue
 
         uid = voice.ssrc_to_user.get(ssrc)
