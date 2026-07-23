@@ -49,6 +49,54 @@ ABANDONED = [
 # room for an hour.
 ALONE_GRACE_SECONDS = 60
 
+# Discord caps a message at 2000 characters; leave headroom.
+MESSAGE_LIMIT = 1900
+
+
+def split_notes(markdown: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """
+    Split notes into messages on '## ' section boundaries.
+
+    Splitting purely on length cuts through the middle of a section — half an
+    action-item list stranded in the next message — which is what makes long
+    notes read badly. Here whole sections travel together, several to a message
+    when they fit, and only a single oversized section ever gets hard-split.
+    """
+    sections: list[str] = []
+    current: list[str] = []
+    for line in markdown.splitlines():
+        # A new '## ' heading starts a new section (the '# Title' stays with the
+        # first one).
+        if line.startswith("## ") and current:
+            sections.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append("\n".join(current).strip())
+    sections = [s for s in sections if s]
+
+    messages: list[str] = []
+    buffer = ""
+    for section in sections:
+        if len(section) > limit:
+            # Genuinely too big on its own — flush, then fall back to line splits.
+            if buffer:
+                messages.append(buffer)
+                buffer = ""
+            messages.extend(chunk_message(section, limit))
+            continue
+        if not buffer:
+            buffer = section
+        elif len(buffer) + 2 + len(section) <= limit:
+            buffer += "\n\n" + section
+        else:
+            messages.append(buffer)
+            buffer = section
+    if buffer:
+        messages.append(buffer)
+    return messages or [markdown[:limit]]
+
 # ─── Cog ───────────────────────────────────────────────────────────────────────
 
 
@@ -333,8 +381,10 @@ class Notes(commands.Cog):
         transcript_path = session.out_dir / "transcript.txt"
         transcript_path.write_text(notes.transcript, encoding="utf-8")
 
-        # Forum post names cap at 100 characters; message bodies at 2000.
-        chunks = chunk_message(notes.summary)
+        # Forum post names cap at 100 characters; message bodies at 2000. Split
+        # on section boundaries so each message is a coherent set of sections
+        # rather than an arbitrary slice.
+        chunks = split_notes(notes.summary)
 
         thread = await forum.create_thread(
             name=notes.title[:100],
