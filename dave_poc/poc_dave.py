@@ -182,23 +182,28 @@ async def on_ready():
 
         # ---- Now the risky part: DAVE decrypt matrix ----
         members = [m.id for m in channel.members if not m.bot]
-        ratchets = {}
-        for uid in members:
-            r = session.get_key_ratchet(str(uid))
-            if r is not None:
-                ratchets[uid] = r
-        log(f"ratchets available for {len(ratchets)}/{len(members)} members")
+        have = [uid for uid in members if session.get_key_ratchet(str(uid)) is not None]
+        log(f"ratchets available for {len(have)}/{len(members)} members")
 
         log("── DAVE decrypt matrix (user x payload start offset) ──")
         offsets = sorted({0, *(eb for _, eb, _ in decoded)})
-        log(f"   trying offsets {offsets} against {len(ratchets)} ratchets")
+        log(f"   trying offsets {offsets} against {len(have)} ratchets")
 
-        sample = decoded[:10]  # keep native-crash exposure small
+        # Only DAVE-framed packets are worth testing; the short ones are silence.
+        sample = [d for d in decoded if d[2].endswith(DAVE_MAGIC)][:10]
+        log(f"   using {len(sample)} DAVE-framed packets")
+
         results = {}
-        for uid, ratchet in ratchets.items():
+        for uid in have:
             for off in offsets:
+                # A ratchet is MOVED into the decryptor by transition_to_key_ratchet
+                # (nanobind relinquishes the Python instance), so it is single-use.
+                # Fetch a fresh one for every decryptor.
+                fresh = session.get_key_ratchet(str(uid))
+                if fresh is None:
+                    continue
                 dec = dave.Decryptor()
-                dec.transition_to_key_ratchet(ratchet)
+                dec.transition_to_key_ratchet(fresh)
                 ok = 0
                 for _ssrc, _eb, pt in sample:
                     frame = pt[off:]
