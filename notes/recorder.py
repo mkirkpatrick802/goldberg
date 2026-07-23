@@ -39,6 +39,11 @@ _READ_CHUNK = SOURCE_RATE * SOURCE_CHANNELS * SAMPLE_WIDTH  # one second
 _process_pool: AudioProcessPool | None = None
 
 
+def _log(msg: str) -> None:
+    """Print with an immediate flush so it can't get stuck in the stdout buffer."""
+    print(f"[Notes] {msg}", flush=True)
+
+
 @dataclass
 class RecordingSession:
     """One in-progress recording. Owned by the cog, one per guild."""
@@ -142,19 +147,19 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
     # first so every /takenotes starts from a clean slate.
     existing = guild.voice_client
     if existing is not None:
-        print(
-            f"[Notes] Guild {guild.id} already had a voice client "
+        _log(
+            f"Guild {guild.id} already had a voice client "
             f"(connected={existing.is_connected()}); disconnecting it first."
         )
         try:
             await existing.disconnect(force=True)
         except Exception as e:
-            print(f"[Notes] Couldn't clear the stale voice client: {e}")
+            _log(f"Couldn't clear the stale voice client: {e}")
 
-    print(f"[Notes] Connecting to voice channel {voice_channel.id}...")
+    _log(f"Connecting to voice channel {voice_channel.id}...")
     voice_client: VoiceClient = await voice_channel.connect(cls=VoiceClient)
-    print(
-        f"[Notes] connect() returned {type(voice_client).__name__}; "
+    _log(
+        f"connect() returned {type(voice_client).__name__}; "
         f"is_connected={voice_client.is_connected()}"
     )
 
@@ -167,11 +172,13 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
 
     if not voice_client.is_connected():
         # Surface the real state instead of the opaque "Not connected to voice".
-        print(
-            f"[Notes] Still not connected after waiting. "
-            f"ws={getattr(voice_client, 'ws', '?')!r} "
-            f"channel={getattr(voice_client, 'channel', '?')!r}"
-        )
+        ws = getattr(voice_client, "ws", None)
+        _log("Still not connected after waiting 5s. State dump:")
+        _log(f"    ws            = {ws!r}")
+        _log(f"    ws.secret_key = {getattr(ws, 'secret_key', '<no ws>')!r}")
+        _log(f"    endpoint      = {getattr(voice_client, 'endpoint', '?')!r}")
+        _log(f"    channel       = {getattr(voice_client, 'channel', '?')!r}")
+        _log(f"    _receiver     = {getattr(voice_client, '_receiver', '?')!r}")
         try:
             await voice_client.disconnect(force=True)
         except Exception:
@@ -184,9 +191,9 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
 
     sink = AudioFileSink(AudioFile, output_dir=str(out_dir))
 
-    print("[Notes] Connected. Starting listener...")
+    _log("Connected. Starting listener...")
     voice_client.listen(sink, _get_process_pool())
-    print("[Notes] Listening.")
+    _log("Listening.")
 
     return RecordingSession(
         voice_client=voice_client,

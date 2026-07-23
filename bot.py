@@ -1,10 +1,29 @@
 ﻿import asyncio
+import logging
 
 import nextcord
 from nextcord.ext import commands
 import os
 
 from config import BOT_TOKEN
+
+# nextcord 3.x's bot.run() does NOT configure logging (unlike discord.py), so
+# the library's own messages — including the real reason a voice connection
+# fails — go nowhere by default. Configure it here so those surface in
+# goldberg.log.
+#
+# The voice handshake detail we're chasing is logged at DEBUG, so the root
+# handler runs at DEBUG; the chatty subsystems are then muted back up so the log
+# isn't drowned. This is turned up for debugging the voice feature — dial the
+# root back to INFO once voice works.
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+for _noisy in ("nextcord.gateway", "nextcord.client", "nextcord.http", "asyncio", "aiohttp"):
+    logging.getLogger(_noisy).setLevel(logging.INFO)
+# The one we actually want in full detail — the voice connection state machine.
+logging.getLogger("nextcord.voice_client").setLevel(logging.DEBUG)
 
 intents = nextcord.Intents.all()
 intents.members = True
