@@ -95,7 +95,11 @@ def summarize(title: str, transcript: str, attendees: list[str] | None = None) -
     # SDK's HTTP timeout. We don't need the individual events, just the result.
     with client.messages.stream(
         model=ANTHROPIC_MODEL,
-        max_tokens=8000,
+        # Covers thinking AND the notes combined. A long, dense meeting can burn
+        # a lot of the budget on thinking at effort=high, so this is set high
+        # enough that the notes themselves never truncate. You're billed only for
+        # tokens actually generated, so a generous ceiling costs nothing.
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         output_config={"effort": "high"},
         system=SYSTEM_PROMPT,
