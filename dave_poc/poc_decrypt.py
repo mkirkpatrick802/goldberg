@@ -53,6 +53,10 @@ MAX_PACKETS = 20000
 # handing one to libdave makes it read past the buffer while parsing the
 # trailer, which corrupts the heap (`malloc(): invalid size`). Filter first.
 DAVE_MAGIC = bytes([0xFA, 0xFA])
+# Empirical libdave stability guards — see process(). 200 frames x 20ms = ~4s of
+# audio, which is plenty to prove the pipeline works.
+MAX_DECRYPTS = 200
+DECRYPTOR_BATCH = 10
 
 
 def log(msg: str) -> None:
@@ -149,14 +153,28 @@ def capture_raw(sock, seconds):
     return out
 
 
-def process(packets, voice, session, stats):
-    """All crypto, single-threaded. Returns {user_id: pcm bytes}."""
+def process(packets, voice, session, stats, max_decrypts=MAX_DECRYPTS, batch=DECRYPTOR_BATCH):
+    """
+    All crypto, single-threaded. Returns {user_id: pcm bytes}.
+
+    Two empirical guards around libdave, both derived from what actually
+    survived: a long-lived Decryptor reused across hundreds of frames corrupts
+    the heap, while poc_dave.py's pattern — a fresh Decryptor + fresh ratchet
+    used for only ~10 frames — ran clean. So we recycle the Decryptor every
+    `batch` frames and cap total calls: a few seconds of audio is all the proof
+    this probe needs, and the cap keeps us well clear of the crash.
+    """
     box = nacl.secret.Aead(bytes(voice.secret_key))
     decryptors: dict[int, dave.Decryptor] = {}
+    per_user_count: dict[int, int] = {}
     decoders: dict[int, opus.Decoder] = {}
     pcm: dict[int, bytearray] = {}
+    total = 0
 
     for data in packets:
+        if total >= max_decrypts:
+            log(f"  reached the {max_decrypts}-frame cap; stopping cleanly.")
+            break
         stats.raw += 1
         ssrc, aad_len, ext_body, has_padding = parse_rtp(data)
 
@@ -188,7 +206,9 @@ def process(packets, voice, session, stats):
             stats.unmapped += 1
             continue
 
-        if uid not in decryptors:
+        # Recycle the Decryptor every `batch` frames (see docstring).
+        n = per_user_count.get(uid, 0)
+        if uid not in decryptors or n % batch == 0:
             # Fresh ratchet per decryptor — it is moved in, not borrowed.
             ratchet = session.get_key_ratchet(str(uid))
             if ratchet is None:
@@ -197,6 +217,9 @@ def process(packets, voice, session, stats):
             dec = dave.Decryptor()
             dec.transition_to_key_ratchet(ratchet)
             decryptors[uid] = dec
+            log(f"  [{total:4d}] fresh decryptor for user {uid}")
+        per_user_count[uid] = n + 1
+        total += 1
 
         out = decryptors[uid].decrypt(dave.MediaType.audio, frame)
         if not out:
