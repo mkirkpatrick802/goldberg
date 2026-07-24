@@ -7,6 +7,7 @@ import ctypes
 import importlib.util
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,11 @@ from notes.settings import (
 
 _model = None
 _libs_ready = False
+# Only one transcription may touch the model at a time. Two meetings can
+# finish close together — the first is still transcribing when the second
+# stops — and concurrent calls would contend for the same model and VRAM.
+_model_lock = threading.Lock()
+_load_lock = threading.Lock()
 
 
 @dataclass
@@ -80,12 +86,21 @@ def get_model():
     Lazily build the WhisperModel and hang onto it.
 
     Loading costs seconds and roughly a gig of VRAM, so building one per file
-    would be painful in the CLI and unacceptable in the cog.
+    would be painful in the CLI and unacceptable in the cog. Guarded so two
+    threads can't race to build a second copy and double the VRAM.
     """
     global _model
     if _model is not None:
         return _model
 
+    with _load_lock:
+        if _model is not None:  # another thread won the race
+            return _model
+        return _build_model()
+
+
+def _build_model():
+    global _model
     _ensure_cuda_libs()
 
     from faster_whisper import WhisperModel  # imported late so the DLL fix runs first
@@ -115,14 +130,15 @@ def transcribe_file(path: Path) -> list[Segment]:
         raise FileNotFoundError(f"No such audio file: {path}")
 
     model = get_model()
-    segments, info = model.transcribe(str(path), beam_size=1, vad_filter=True)
-
-    # segments is a generator; consuming it is what actually does the work.
-    result = [
-        Segment(start=s.start, end=s.end, text=s.text.strip())
-        for s in segments
-        if s.text.strip()
-    ]
+    # segments is a lazy generator — the real work happens while consuming it,
+    # so the lock has to cover consumption too, not just the transcribe() call.
+    with _model_lock:
+        segments, info = model.transcribe(str(path), beam_size=1, vad_filter=True)
+        result = [
+            Segment(start=s.start, end=s.end, text=s.text.strip())
+            for s in segments
+            if s.text.strip()
+        ]
     print(
         f"[Notes] {path.name}: {len(result)} segments, "
         f"{info.duration:.0f}s audio, language={info.language}"

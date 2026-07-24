@@ -56,6 +56,48 @@ def ensure_user(data, sprint, user_id):
         data["sprints"][sprint][user_id].setdefault(k, v)
 
 
+# ── Office-hours session dedup ────────────────────────────────────────────────
+# Both office-hour counters must be idempotent per person, per office-hour
+# occurrence: a host who mutes/rejoins, or an attendee who leaves and comes
+# back, must not be counted twice. We identify an occurrence by the host's
+# discord id plus the calendar date of the scheduled slot, and remember what
+# we've already counted for it in telemetry.json so restarts don't reset it.
+
+def _office_hour_session(member_data, now):
+    """
+    If `now` falls within `member_data`'s office-hour window, return that
+    occurrence's session key ('{discord_id}-{YYYY-MM-DD}'). Otherwise None.
+
+    The window is the scheduled 1-hour slot padded by OFFICE_HOUR_BUFFER_MINUTES
+    on each side, and is shared by both the host-attendance and attendee counts
+    so they always agree on when an office hour is "live".
+    """
+    discord_id = member_data.get("discord_id")
+    day        = member_data.get("day")
+    time_str   = member_data.get("start_time")
+    if not discord_id or not day or not time_str:
+        return None
+    if now.strftime("%A") != day:
+        return None
+    try:
+        hour, minute = map(int, time_str.split(":"))
+    except ValueError:
+        return None
+
+    scheduled_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    window_start = scheduled_dt - timedelta(minutes=OFFICE_HOUR_BUFFER_MINUTES)
+    window_end   = scheduled_dt + timedelta(hours=1, minutes=OFFICE_HOUR_BUFFER_MINUTES)
+    if not (window_start <= now <= window_end):
+        return None
+    return f"{discord_id}-{scheduled_dt.strftime('%Y-%m-%d')}"
+
+
+def _session_record(data, session_key):
+    """Get (creating if needed) the dedup record for one office-hour occurrence."""
+    sessions = data.setdefault("office_hours_sessions", {})
+    return sessions.setdefault(session_key, {"host_counted": False, "attendees": []})
+
+
 # ── SVN helpers (blocking; call via asyncio.to_thread) ────────────────────────
 # These deliberately don't reuse commit_notifier's fetch: that one asks for only
 # the single newest commit, which is fine for announcing but would undercount
@@ -199,6 +241,9 @@ class Telemetry(commands.Cog):
         data["current_sprint"] = sprint_name
         if sprint_name not in data["sprints"]:
             data["sprints"][sprint_name] = {}
+        # Office-hour dedup records are keyed by date and only matter within the
+        # sprint they were counted in, so a new sprint clears the scratchpad.
+        data["office_hours_sessions"] = {}
         save_telemetry(data)
 
     @check_sprint.before_loop
@@ -243,6 +288,14 @@ class Telemetry(commands.Cog):
         if member.bot:
             return
 
+        # Ignore in-channel state changes — mute, deafen, start/stop streaming,
+        # camera on/off all fire this event with before.channel == after.channel.
+        # Treating them as joins re-ran every counter on each toggle, inflating
+        # office-hour attendance and popularity. Only real joins/moves/leaves
+        # change the channel.
+        if before.channel == after.channel:
+            return
+
         setup        = load_setup_config()
         category_id  = setup.get("dev_zone_category_id")
         now          = datetime.now(EASTERN)
@@ -268,86 +321,66 @@ class Telemetry(commands.Cog):
             in_category = (after.channel.category_id == category_id) if category_id else True
             if in_category:
                 self._voice_join_times[user_id] = now
+                self._track_office_hours(member, after.channel, now)
 
-                # ── Office hours attendance (host) ──────────────────────────────
-                try:
-                    sheet_data = get_sheet_members()
-                except Exception as e:
-                    print(f"[Telemetry] Failed to load sheet: {e}")
-                    return
+    # ── Office-hours attendance & popularity ────────────────────────────────────
+    def _track_office_hours(self, member, channel, now):
+        """
+        Record office-hour attendance for a real channel join. Both counters
+        dedup per office-hour occurrence (see _office_hour_session), so a host
+        who rejoins or an attendee who comes and goes is only ever counted once.
+        """
+        user_id = str(member.id)
+        try:
+            sheet_data = get_sheet_members()
+        except Exception as e:
+            print(f"[Telemetry] Failed to load sheet: {e}")
+            return
 
-                member_data = next((m for m in sheet_data if m.get("discord_id") == user_id), None)
-                if member_data:
-                    scheduled_day  = member_data.get("day")
-                    scheduled_time = member_data.get("start_time")
-
-                    if scheduled_day and scheduled_time and now.strftime("%A") == scheduled_day:
-                        try:
-                            hour, minute = map(int, scheduled_time.split(":"))
-                        except ValueError:
-                            hour, minute = None, None
-
-                        if hour is not None:
-                            scheduled_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                            window_start = scheduled_dt - timedelta(minutes=OFFICE_HOUR_BUFFER_MINUTES)
-                            window_end   = scheduled_dt + timedelta(hours=1, minutes=OFFICE_HOUR_BUFFER_MINUTES)
-
-                            if window_start <= now <= window_end:
-                                data   = load_telemetry()
-                                sprint = data.get("current_sprint")
-                                if sprint:
-                                    ensure_user(data, sprint, user_id)
-                                    current = data["sprints"][sprint][user_id]["office_hours_attended"]
-                                    if current < 2:
-                                        data["sprints"][sprint][user_id]["office_hours_attended"] = current + 1
-                                        save_telemetry(data)
-                                        print(f"[Telemetry] Office hours attendance logged for {member.name} ({current + 1}/2)")
-
-                # ── Office hours popularity (count attendees joining host's VC) ──
-                # Check if this channel currently has a host running office hours
-                for host in sheet_data:
-                    host_id            = host.get("discord_id")
-                    host_scheduled_day = host.get("day")
-                    host_scheduled_time = host.get("start_time")
-
-                    if not host_id or host_id == user_id:
-                        continue
-                    if not host_scheduled_day or not host_scheduled_time:
-                        continue
-                    if now.strftime("%A") != host_scheduled_day:
-                        continue
-
-                    try:
-                        h_hour, h_min = map(int, host_scheduled_time.split(":"))
-                    except ValueError:
-                        continue
-
-                    h_dt         = now.replace(hour=h_hour, minute=h_min, second=0, microsecond=0)
-                    h_window_start = h_dt
-                    h_window_end   = h_dt + timedelta(hours=1)
-
-                    if not (h_window_start <= now <= h_window_end):
-                        continue
-
-                    # Check if the host is in this channel
-                    guild = self.bot.get_guild(SERVER_ID)
-                    if not guild:
-                        continue
-                    host_member = guild.get_member(int(host_id))
-                    if not host_member:
-                        continue
-                    if not host_member.voice or host_member.voice.channel != after.channel:
-                        continue
-
-                    # Host is in this channel during their office hours — count this join
-                    data   = load_telemetry()
-                    sprint = data.get("current_sprint")
-                    if sprint:
-                        ensure_user(data, sprint, host_id)
-                        data["sprints"][sprint][host_id]["office_hours_attendees"] += 1
+        # ── Host attended their own office hours ────────────────────────────────
+        member_data = next((m for m in sheet_data if m.get("discord_id") == user_id), None)
+        if member_data:
+            session_key = _office_hour_session(member_data, now)
+            if session_key:
+                data   = load_telemetry()
+                sprint = data.get("current_sprint")
+                if sprint:
+                    record = _session_record(data, session_key)
+                    if not record["host_counted"]:
+                        ensure_user(data, sprint, user_id)
+                        data["sprints"][sprint][user_id]["office_hours_attended"] += 1
+                        record["host_counted"] = True
                         save_telemetry(data)
-                        print(f"[Telemetry] {member.name} joined {host['name']}'s office hours")
-                    break
+                        print(f"[Telemetry] Office hours attendance logged for {member.name}")
+
+        # ── Attendee joined a host's live office hours ──────────────────────────
+        guild = self.bot.get_guild(SERVER_ID)
+        for host in sheet_data:
+            host_id = host.get("discord_id")
+            if not host_id or host_id == user_id:
+                continue
+            session_key = _office_hour_session(host, now)
+            if not session_key:
+                continue
+
+            # The host must actually be sitting in the channel this person joined.
+            if not guild:
+                continue
+            host_member = guild.get_member(int(host_id))
+            if not host_member or not host_member.voice or host_member.voice.channel != channel:
+                continue
+
+            data   = load_telemetry()
+            sprint = data.get("current_sprint")
+            if sprint:
+                record = _session_record(data, session_key)
+                if user_id not in record["attendees"]:
+                    ensure_user(data, sprint, host_id)
+                    data["sprints"][sprint][host_id]["office_hours_attendees"] += 1
+                    record["attendees"].append(user_id)
+                    save_telemetry(data)
+                    print(f"[Telemetry] {member.name} joined {host['name']}'s office hours")
+            break
 
     # ── SVN commit tracking ─────────────────────────────────────────────────────
 

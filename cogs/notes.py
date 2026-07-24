@@ -155,10 +155,19 @@ class Notes(commands.Cog):
             return
 
         guild_id = interaction.guild.id
-        if guild_id in self.sessions:
+        existing = self.sessions.get(guild_id)
+        if existing is not None:
+            # Not an arbitrary limit: Discord only gives a bot ONE voice
+            # connection per server, so a second meeting genuinely can't be
+            # recorded. Say where the first one is so they know why.
+            where = self.bot.get_channel(existing.channel_id)
+            where_txt = where.mention if where else "another voice channel"
+            elapsed = int((datetime.now() - existing.started_at).total_seconds() // 60)
             await interaction.response.send_message(
-                "I'm already recording. One meeting at a time — I'm a bot, not a "
-                "court stenographer with a clone army.",
+                f"I'm already recording **{existing.title}** in {where_txt} "
+                f"({elapsed} min so far). Discord only lets me sit in one voice "
+                f"channel per server, so this meeting will have to wait for "
+                f"`/stopnotes` — or take notes the old-fashioned way. Tragic.",
                 ephemeral=True,
             )
             return
