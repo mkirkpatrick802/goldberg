@@ -112,6 +112,32 @@ class Notes(commands.Cog):
         self.notify_channels: dict[int, int] = {}
         # Pending "everyone left" countdowns, one per guild.
         self.alone_timers: dict[int, asyncio.Task] = {}
+        # Forum tag chosen at /takenotes, applied to the post at /stopnotes.
+        self.session_tags: dict[int, str] = {}
+
+    def _forum(self):
+        """The configured notes forum channel, or None."""
+        ch = self.bot.get_channel(NOTES_FORUM_CHANNEL_ID) if NOTES_FORUM_CHANNEL_ID else None
+        return ch if isinstance(ch, nextcord.ForumChannel) else None
+
+    @staticmethod
+    def _attendees_in(channel) -> set[int]:
+        """
+        Who counts as an attendee right now.
+
+        In a stage channel that's the people *on stage* (`.speakers`) — not the
+        whole audience, which for an all-hands could be dozens of silent
+        listeners. Someone brought up onto the stage becomes a speaker, so they
+        get picked up here and by the live tracking in on_voice_state_update. In
+        a normal voice channel everyone present counts.
+        """
+        if channel is None:
+            return set()
+        if isinstance(channel, nextcord.StageChannel):
+            people = channel.speakers
+        else:
+            people = getattr(channel, "members", [])
+        return {m.id for m in people if not m.bot}
 
     def cog_unload(self):
         for task in (*self.timers.values(), *self.alone_timers.values()):
@@ -126,6 +152,10 @@ class Notes(commands.Cog):
     async def take_notes(
         self,
         interaction: nextcord.Interaction,
+        team: Optional[str] = nextcord.SlashOption(
+            description="Which group is this? Tags the forum post so it stays organized.",
+            required=False,
+        ),
         title: Optional[str] = nextcord.SlashOption(
             description="What's this meeting about? Defaults to the date and time.",
             required=False,
@@ -136,6 +166,20 @@ class Notes(commands.Cog):
                 "Devs only. If you have to ask why, you're not one. 🕶️", ephemeral=True
             )
             return
+
+        # Validate the chosen tag against the forum's real tags. Someone can type
+        # free text past the autocomplete, and a bad tag shouldn't lose a meeting.
+        if team:
+            forum = self._forum()
+            names = {t.name.lower() for t in forum.available_tags} if forum else set()
+            if team.lower() not in names:
+                available = ", ".join(sorted(t.name for t in forum.available_tags)) if forum else "none"
+                await interaction.response.send_message(
+                    f"**{team}** isn't a tag on the notes forum. Pick one of: "
+                    f"{available or 'none set up yet'}.",
+                    ephemeral=True,
+                )
+                return
 
         if not NOTES_FORUM_CHANNEL_ID:
             await interaction.response.send_message(
@@ -193,19 +237,35 @@ class Notes(commands.Cog):
             )
             return
 
+        # recorder.start seeds attendees from raw members; on a stage that's the
+        # whole audience, so re-seed with just the on-stage crowd.
+        session.attendee_ids = self._attendees_in(voice_state.channel)
+
         self.sessions[guild_id] = session
         self.notify_channels[guild_id] = interaction.channel.id
         self.timers[guild_id] = asyncio.create_task(self._auto_stop(guild_id))
+        if team:
+            self.session_tags[guild_id] = team
 
         # Deliberately NOT ephemeral — everyone in the call is being recorded and
         # is entitled to see that plainly.
+        tag_line = f"\n🏷️ Tagged **{team}**." if team else ""
         await interaction.followup.send(
-            f"🔴 **Recording — {title}**\n"
+            f"🔴 **Recording — {title}**{tag_line}\n"
             f"{random.choice(START_LINES)}\n\n"
             f"*Everyone in {voice_state.channel.mention} is being recorded. "
             f"Notes get posted publicly when someone runs `/stopnotes`. "
             f"I'll stop on my own after {NOTES_MAX_MINUTES} minutes.*"
         )
+
+    @take_notes.on_autocomplete("team")
+    async def _team_autocomplete(self, interaction: nextcord.Interaction, value: str):
+        """Offer the forum's real tags, filtered by what's been typed so far."""
+        forum = self._forum()
+        names = sorted(t.name for t in forum.available_tags) if forum else []
+        if value:
+            names = [n for n in names if value.lower() in n.lower()]
+        await interaction.response.send_autocomplete(names[:25])
 
     # ── /stopnotes ──────────────────────────────────────────────────────────────
     @nextcord.slash_command(
@@ -265,7 +325,19 @@ class Notes(commands.Cog):
                     await self._finish(guild_id, channel)
             return
 
-        # Someone else moved. Are any humans left in the channel we're recording?
+        # Someone was brought up onto the stage (or is otherwise now a speaker in
+        # the channel we're recording) — count them as an attendee, even if they
+        # never say anything.
+        if (
+            not member.bot
+            and after.channel is not None
+            and after.channel.id == session.channel_id
+            and not after.suppress
+        ):
+            session.attendee_ids.add(member.id)
+
+        # Are any humans left in the channel we're recording? On a stage the
+        # audience keeps it alive too — leaving an empty stage is still empty.
         voice_channel = self.bot.get_channel(session.channel_id)
         humans = [
             m for m in getattr(voice_channel, "members", []) if not m.bot
@@ -327,15 +399,14 @@ class Notes(commands.Cog):
             if task is not None and task is not current and not task.done():
                 task.cancel()
         self.notify_channels.pop(guild_id, None)
+        team_tag = self.session_tags.pop(guild_id, None)
 
         try:
-            # Anyone still sitting in the channel counts, including people who
-            # never spoke and so produced no audio stream.
+            # Anyone still present at the end counts too, including people who
+            # never spoke. On a stage this is the on-stage crowd, not the
+            # audience.
             voice_channel = self.bot.get_channel(session.channel_id)
-            if voice_channel is not None:
-                session.attendee_ids.update(
-                    m.id for m in voice_channel.members if not m.bot
-                )
+            session.attendee_ids.update(self._attendees_in(voice_channel))
 
             sources = await recorder.stop(session)
             if not sources:
@@ -358,7 +429,7 @@ class Notes(commands.Cog):
                 pipeline.process, sources, session.title, attendees
             )
 
-            await self._post_notes(notes, session, notify_channel)
+            await self._post_notes(notes, session, notify_channel, team_tag)
 
         except Exception as e:
             print(f"[Notes] Failed to produce notes for guild {guild_id}: {e}")
@@ -374,7 +445,7 @@ class Notes(commands.Cog):
             # Meeting audio is large and there's no reason to keep it.
             shutil.rmtree(session.out_dir, ignore_errors=True)
 
-    async def _post_notes(self, notes, session, notify_channel) -> None:
+    async def _post_notes(self, notes, session, notify_channel, team_tag=None) -> None:
         """Create the forum post: notes as the body, transcript as an attachment."""
         forum = self.bot.get_channel(NOTES_FORUM_CHANNEL_ID)
         if forum is None or not isinstance(forum, nextcord.ForumChannel):
@@ -390,6 +461,18 @@ class Notes(commands.Cog):
         transcript_path = session.out_dir / "transcript.txt"
         transcript_path.write_text(notes.transcript, encoding="utf-8")
 
+        # Resolve the chosen team to a real ForumTag. Tags can be renamed or
+        # deleted between /takenotes and now, so a miss just means no tag rather
+        # than a failed post.
+        applied_tags = []
+        if team_tag:
+            match = next(
+                (t for t in forum.available_tags if t.name.lower() == team_tag.lower()),
+                None,
+            )
+            if match is not None:
+                applied_tags = [match]
+
         # Forum post names cap at 100 characters; message bodies at 2000. Split
         # on section boundaries so each message is a coherent set of sections
         # rather than an arbitrary slice.
@@ -399,6 +482,7 @@ class Notes(commands.Cog):
             name=notes.title[:100],
             content=chunks[0],
             file=nextcord.File(str(transcript_path), filename="transcript.txt"),
+            applied_tags=applied_tags or None,
             allowed_mentions=nextcord.AllowedMentions.none(),
         )
 
