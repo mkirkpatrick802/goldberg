@@ -29,20 +29,34 @@ def _fmt_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def build_transcript(sources: dict[str, Path]) -> str:
-    """
-    Transcribe every speaker's audio and interleave it into one timeline.
+# A message typed in the channel's text chat: (seconds from meeting start,
+# author, text). Same time base as the audio segments.
+ChatMessage = tuple[float, str, str]
 
-    Each file is transcribed independently, so timestamps are only comparable
-    because every stream starts at the same moment — which is how the recorder
-    writes them. Sorting by start time is what turns N monologues back into a
-    conversation.
+
+def build_transcript(
+    sources: dict[str, Path],
+    chat: list[ChatMessage] | None = None,
+) -> str:
+    """
+    Transcribe every speaker's audio and interleave it — with any text chat —
+    into one timeline.
+
+    Each audio file is transcribed independently, so timestamps are only
+    comparable because every stream starts at the same moment (the recorder
+    writes them on a shared clock). Typed messages carry their own offset from
+    the same start, so sorting everything by time turns N monologues plus the
+    chat back into one conversation. Spoken lines and typed lines are labelled
+    differently so the summariser knows which is verbatim.
     """
     tagged: list[tuple[float, str, str]] = []
 
     for speaker, path in sources.items():
         for segment in transcribe_file(Path(path)):
             tagged.append((segment.start, speaker, segment.text))
+
+    for offset, author, text in chat or []:
+        tagged.append((offset, f"{author} (typed)", text))
 
     tagged.sort(key=lambda row: row[0])
 
@@ -55,24 +69,29 @@ def process(
     sources: dict[str, Path],
     title: str,
     attendees: list[str] | None = None,
+    chat: list[ChatMessage] | None = None,
 ) -> Notes:
     """
-    Transcribe the given speaker -> audio file mapping and summarize it.
+    Transcribe the given speaker -> audio file mapping, fold in any text chat,
+    and summarize.
 
     `attendees` should be the display names of everyone in the voice channel,
     resolved from their Discord IDs by the caller. It's passed in rather than
     derived from `sources` because the two genuinely differ: someone who sat in
     the call without speaking produces no audio stream but did attend.
-    """
-    if not sources:
-        raise ValueError("No audio sources to process.")
 
-    transcript = build_transcript(sources)
+    `chat` is messages typed in the channel during the meeting, so a decision or
+    link that was only typed still makes it into the notes.
+    """
+    if not sources and not chat:
+        raise ValueError("Nothing to process — no audio and no chat.")
+
+    transcript = build_transcript(sources, chat)
 
     if not transcript.strip():
         raise ValueError(
-            "Nothing was transcribed — the recording appears to be silent. "
-            "Check that audio was actually captured before blaming the model."
+            "Nothing was transcribed and no chat was captured — the meeting "
+            "appears to be silent. Check that audio was actually recorded."
         )
 
     summary = summarizer.summarize(title, transcript, attendees=attendees)

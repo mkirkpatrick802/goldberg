@@ -346,6 +346,21 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
     if not voice.is_connected():
         raise RuntimeError("Joined the channel but the voice connection never became ready.")
 
+    # On a stage the bot joins as audience (suppressed). A suppressed listener
+    # isn't a full participant in the speakers' DAVE encryption group, so the
+    # group never forms for us and we can't decrypt. Bring the bot up onto the
+    # stage so it's a real participant. Needs the "Mute Members" permission; if
+    # it's missing, say so plainly — a human can bring the bot up manually.
+    if isinstance(voice_channel, nextcord.StageChannel):
+        try:
+            await guild.me.edit(suppress=False)
+            _log("Requested speaker status on the stage.")
+        except nextcord.Forbidden:
+            _log("WARNING: can't bring myself onto the stage (missing 'Mute Members'). "
+                 "Someone needs to make me a speaker, or the group won't form.")
+        except Exception as e:
+            _log(f"WARNING: couldn't take the stage: {e}")
+
     e2ee = getattr(voice, "e2ee_state", None)
     mls = getattr(e2ee, "_session", None) if e2ee else None
     if mls is None:
@@ -354,13 +369,18 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
             "This connection has no DAVE session. The bot needs nextcord 3.2+ "
             "with dave-py installed."
         )
-    for _ in range(60):
+    # Wait for the group, but don't hard-fail if it's slow. It can form later —
+    # e.g. once someone starts speaking on a stage — and the per-packet decrypt
+    # picks up the ratchets as soon as it does. Recording nothing decryptable is
+    # handled downstream (an empty result posts "nobody said a word"), which is
+    # far better than refusing to record at all.
+    for _ in range(20):  # ~10s
         if mls.has_established_group():
             break
         await asyncio.sleep(0.5)
     if not mls.has_established_group():
-        await voice.disconnect(force=True)
-        raise RuntimeError("The DAVE encryption group never formed; cannot decode audio.")
+        _log("DAVE group not formed yet — recording anyway; it should form once "
+             "audio starts flowing.")
 
     session = RecordingSession(
         voice_client=voice,

@@ -27,6 +27,12 @@ participates, so it does not matter who said a given thing or who made a call �
 record what was said and decided, not who voiced it. The one exception is work \
 assignment: when a task is given to someone, name the owner.
 
+Lines labelled "(typed)" were sent in the channel's text chat, not spoken. \
+Treat them as reliable, verbatim content — links, code, exact numbers and \
+names in those lines are trustworthy and worth preserving exactly, unlike the \
+spoken lines which may be mis-heard. A link or decision that only appears in a \
+typed line still belongs in the notes.
+
 Choose the sections that fit this particular meeting rather than forcing a fixed \
 template. Always open with a `# <title>` heading, an `## Attendees` list, and a \
 `## Summary`. After that, use whichever of these earn their place — and add \

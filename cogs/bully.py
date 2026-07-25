@@ -64,7 +64,7 @@ RANDOM_EMOJIS = ["💀", "🤡", "😐", "🫠", "💅", "🙃", "😬", "🧐",
 
 # Name-drop reactions: fire when someone types "Goldberg" (no @ required).
 NAME_COOLDOWN_SECONDS = 30
-NAME_REPLY_CHANCE = 0.25  # otherwise he just slaps an emoji on it
+NAME_REPLY_CHANCE = 0.15  # otherwise he just slaps an emoji on it
 
 NAME_EMOJIS = ["👀", "🫡", "😏", "🗣️", "💅", "🧐", "🙄", "🎯", "😌", "🫰"]
 
@@ -138,7 +138,7 @@ class Bully(commands.Cog):
         # Random behavior in bully channels only
         if in_bully_channel:
             roll = random.random()
-            if roll < 0.01:
+            if roll < 0.005:
                 reply = random.choice(RANDOM_REPLIES)
                 await message.channel.send(reply.format(mention=message.author.mention))
             elif roll < 0.10:

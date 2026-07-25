@@ -1,6 +1,7 @@
 import asyncio
 import random
 import shutil
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -114,6 +115,8 @@ class Notes(commands.Cog):
         self.alone_timers: dict[int, asyncio.Task] = {}
         # Forum tag chosen at /takenotes, applied to the post at /stopnotes.
         self.session_tags: dict[int, str] = {}
+        # Messages typed in the channel during a meeting: guild -> [(offset, author, text)].
+        self.session_chat: dict[int, list] = {}
 
     def _forum(self):
         """The configured notes forum channel, or None."""
@@ -297,6 +300,33 @@ class Notes(commands.Cog):
 
         await self._finish(guild_id, interaction.channel)
 
+    # ── Capture the channel's text chat during a meeting ─────────────────────────
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        """
+        Buffer messages typed in the voice channel while it's being recorded.
+
+        Discord voice/stage channels have their own text chat, and a link or
+        decision that only gets typed should still land in the notes. Stamped
+        with the same monotonic clock the audio uses, so it interleaves cleanly.
+        """
+        if message.author.bot or message.guild is None:
+            return
+        session = self.sessions.get(message.guild.id)
+        if session is None or message.channel.id != session.channel_id:
+            return
+
+        text = message.clean_content.strip()
+        if message.attachments:
+            text += " " + " ".join(f"[shared: {a.filename}]" for a in message.attachments)
+        if not text.strip():
+            return
+
+        offset = max(0.0, time.monotonic() - session.started_monotonic)
+        self.session_chat.setdefault(message.guild.id, []).append(
+            (offset, message.author.display_name, text.strip())
+        )
+
     # ── Failsafes: nobody left to record ────────────────────────────────────────
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -400,6 +430,7 @@ class Notes(commands.Cog):
                 task.cancel()
         self.notify_channels.pop(guild_id, None)
         team_tag = self.session_tags.pop(guild_id, None)
+        chat = self.session_chat.pop(guild_id, [])
 
         try:
             # Anyone still present at the end counts too, including people who
@@ -409,10 +440,11 @@ class Notes(commands.Cog):
             session.attendee_ids.update(self._attendees_in(voice_channel))
 
             sources = await recorder.stop(session)
-            if not sources:
+            if not sources and not chat:
                 await notify_channel.send(
-                    "Recording stopped, but there's no audio to work with. "
-                    "Either nobody said a word or something went wrong on my end."
+                    "Recording stopped, but there's nothing to work with — no "
+                    "audio and no chat. Either nobody said or typed a word, or "
+                    "something went wrong on my end."
                 )
                 return
 
@@ -426,7 +458,7 @@ class Notes(commands.Cog):
             # they go off the event loop — the bot stays responsive to other
             # commands while a meeting is being written up.
             notes = await asyncio.to_thread(
-                pipeline.process, sources, session.title, attendees
+                pipeline.process, sources, session.title, attendees, chat
             )
 
             await self._post_notes(notes, session, notify_channel, team_tag)
@@ -481,13 +513,20 @@ class Notes(commands.Cog):
         thread = await forum.create_thread(
             name=notes.title[:100],
             content=chunks[0],
-            file=nextcord.File(str(transcript_path), filename="transcript.txt"),
             applied_tags=applied_tags or None,
             allowed_mentions=nextcord.AllowedMentions.none(),
         )
 
         for chunk in chunks[1:]:
             await thread.send(chunk, allowed_mentions=nextcord.AllowedMentions.none())
+
+        # Transcript last, as its own message, so it sits at the very end of the
+        # notes rather than buried under the first section.
+        await thread.send(
+            "📄 **Full transcript** attached.",
+            file=nextcord.File(str(transcript_path), filename="transcript.txt"),
+            allowed_mentions=nextcord.AllowedMentions.none(),
+        )
 
         if notify_channel.id != thread.id:
             await notify_channel.send(f"📝 Notes are up: {thread.jump_url}")
