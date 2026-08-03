@@ -10,7 +10,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 from config import SERVER_ID, TAIGA_URL, TAIGA_PROJECT_SLUG, REPO_LINK
-from utils import get_sheet_members
+from utils import get_sheet_members, pick_current_milestone
 
 TELEMETRY_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "telemetry.json"))
 SETUP_FILE     = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json"))
@@ -203,7 +203,7 @@ class Telemetry(commands.Cog):
             milestones = await resp.json()
             if not isinstance(milestones, list) or len(milestones) == 0:
                 return None, None
-            sprint = milestones[0]
+            sprint = pick_current_milestone(milestones)
             return sprint.get("name"), project_id
 
     async def get_sprint_tasks(self, project_id, sprint_id):
@@ -483,7 +483,7 @@ class Telemetry(commands.Cog):
             milestones = await resp.json()
             if not milestones:
                 return
-            sprint_id = milestones[0].get("id")
+            sprint_id = pick_current_milestone(milestones).get("id")
 
         sprint_tasks = await self.get_sprint_tasks(project_id, sprint_id)
 
@@ -497,7 +497,7 @@ class Telemetry(commands.Cog):
 
         incomplete_by_user = {}
         for task in sprint_tasks:
-            status = task.get("status_extra_info", {}).get("name", "").lower()
+            status = (task.get("status_extra_info") or {}).get("name", "").lower()
             if status not in ("new", "in progress"):
                 continue
             assigned = task.get("assigned_to_extra_info")

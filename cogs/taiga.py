@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from config import TAIGA_URL, TAIGA_USERNAME, TAIGA_PASSWORD, TAIGA_PROJECT_SLUG, SERVER_ID
-from utils import get_sheet_members, chunk_message, is_dev
+from utils import get_sheet_members, chunk_message, is_dev, pick_current_milestone
 
 SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 REMINDER_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "reminder_data.json")
@@ -131,8 +131,9 @@ class Taiga(commands.Cog):
         milestones = await resp.json()
         if not milestones:
             return None
-        # Return the first open sprint
-        return milestones[0]
+        # Sprint whose dates contain today (old sprints are left open in Taiga,
+        # so the newest-listed milestone isn't reliably the active one).
+        return pick_current_milestone(milestones)
 
     async def get_sprint_tasks(self, session, project_id, sprint_id):
         all_tasks = []
@@ -198,7 +199,7 @@ class Taiga(commands.Cog):
 
         grouped: dict = {}
         for task in tasks:
-            status = task.get("status_extra_info", {}).get("name", "").lower()
+            status = (task.get("status_extra_info") or {}).get("name", "").lower()
             if status not in ("new", "in progress"):
                 continue
 
@@ -211,7 +212,7 @@ class Taiga(commands.Cog):
                 continue
 
             title = task.get("subject", "Untitled")
-            story_title = task.get("user_story_extra_info", {}).get("subject", "No Story")
+            story_title = (task.get("user_story_extra_info") or {}).get("subject", "No Story")
             entry = f"• {title} *({story_title})*"
 
             bucket = grouped.setdefault(discord_id, {"new": [], "in_progress": []})
@@ -304,7 +305,7 @@ class Taiga(commands.Cog):
         grouped = {}
 
         for task in tasks:
-            status = task.get("status_extra_info", {}).get("name", "").lower()
+            status = (task.get("status_extra_info") or {}).get("name", "").lower()
             if status not in ("new", "in progress"):
                 continue
 

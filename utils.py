@@ -1,5 +1,29 @@
 import os
 import sys
+from datetime import date
+
+
+def pick_current_milestone(milestones: list) -> dict | None:
+    """Choose the 'current' sprint from Taiga's open (closed=false) milestones.
+
+    Prefer the milestone whose date range contains today
+    (estimated_start <= today <= estimated_finish). Falls back to the first
+    milestone when none match — e.g. a gap between sprints, or a milestone
+    missing its dates. Returns None only for an empty list.
+
+    This exists because old sprints are often left open in Taiga, so
+    `milestones[0]` is not reliably the active one: a pre-created future sprint
+    would sort ahead of the real one and empty everyone's task lists.
+    """
+    if not milestones:
+        return None
+    today = date.today().isoformat()  # 'YYYY-MM-DD' sorts chronologically
+    for m in milestones:
+        start = m.get("estimated_start")
+        finish = m.get("estimated_finish")
+        if start and finish and start <= today <= finish:
+            return m
+    return milestones[0]
 
 
 def is_dev(interaction) -> bool:
