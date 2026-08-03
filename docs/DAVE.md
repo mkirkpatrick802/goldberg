@@ -110,6 +110,32 @@ words to the right people in the wrong order.
 Audio is downsampled to **16kHz mono on the way in**, which is what Whisper wants
 anyway: ~230MB per speaker for a two-hour meeting instead of ~1.4GB.
 
+## Stage channels don't use DAVE
+
+Verified on a live stage with `dave_poc/poc_stage.py`: **stage audio is not
+DAVE-encrypted.** 0/60 transport-decrypted frames ended in the `0xFAFA` magic
+marker, and the transport plaintext (past the extension body) Opus-decoded
+directly. nextcord says so itself in its logs — `Failed to set up ratchet,
+encryptor is not initialised` — and `has_established_group()` never turns true,
+because there is no MLS group for a stage.
+
+So on a stage the pipeline is one step shorter — there is no DAVE unwrap:
+
+```
+RTP packet -> transport AEAD unwrap -> strip padding -> skip ext body -> Opus decode
+```
+
+`recorder.py` branches on `RecordingSession.is_stage`: `_decrypt_packet` returns
+the post-ext-body frame as the Opus payload directly, and `start()` skips the
+MLS group wait entirely. Normal voice channels are unchanged and still run the
+full DAVE path.
+
+Note this cost a wrong turn first: the bot was joining a stage as suppressed
+audience, so we assumed the fix was to become a speaker and re-key into the
+group. It wasn't — becoming an un-suppressed speaker (`still_suppressed=False`)
+still left `group_formed=False`, because the group never exists on a stage at
+all. Don't reason about this layer; probe it.
+
 ## Verifying a change
 
 `dave_poc/` holds the throwaway probes used to establish all of the above. They

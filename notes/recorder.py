@@ -203,6 +203,9 @@ class RecordingSession:
     title: str
     started_at: datetime
     attendee_ids: set[int] = field(default_factory=set)
+    # Stage channels don't apply DAVE, so their audio is decoded straight from
+    # the transport layer with no ratchet (see _decrypt_packet). Set at start().
+    is_stage: bool = False
 
     # internals
     packets: "queue.Queue" = field(default_factory=queue.Queue)
@@ -264,13 +267,23 @@ def _decrypt_packet(session: RecordingSession, arrival: float, data: bytes):
             plain = plain[:-pad]
 
     frame = plain[ext_body:] if ext_body else plain
-    # Silence/comfort-noise frames aren't DAVE frames; handing one to libdave
-    # makes it read past its buffer.
-    if len(frame) < 8 or not frame.endswith(DAVE_MAGIC):
-        return None
 
     user_id = voice.ssrc_to_user.get(ssrc)
     if user_id is None:
+        return None
+
+    # Stage channels don't wrap audio in DAVE (see start() and
+    # dave_poc/poc_stage.py — 0/60 frames carried the 0xFAFA marker and the
+    # transport plaintext Opus-decoded directly). So the frame past the extension
+    # body already IS the Opus payload: decode it straight, no ratchet needed.
+    # Discord's ~3-byte comfort-noise frames aren't worth decoding.
+    if session.is_stage:
+        return (user_id, frame) if len(frame) >= 8 else None
+
+    # Normal voice channel: the payload is DAVE-wrapped. Silence/comfort-noise
+    # frames aren't DAVE frames; handing one to libdave makes it read past its
+    # buffer.
+    if len(frame) < 8 or not frame.endswith(DAVE_MAGIC):
         return None
 
     seen = session.frames_seen.get(user_id, 0)
@@ -390,31 +403,30 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
     # On a stage the bot joins as audience (suppressed); bring it up as a speaker.
     await _take_stage(voice_channel, guild)
 
-    mls = _mls_session(voice)
-    if mls is None:
-        await voice.disconnect(force=True)
-        raise RuntimeError(
-            "This connection has no DAVE session. The bot needs nextcord 3.2+ "
-            "with dave-py installed."
-        )
-    # Wait for the group, but don't hard-fail if it's slow. It can form later,
-    # and the per-packet decrypt picks up the ratchets as soon as it does. Total
-    # failure is now caught by the cog (a liveness warning within the minute, and
-    # a plain error at the end instead of chat dressed up as notes), which beats
-    # refusing to record at all.
-    #
-    # KNOWN LIMITATION — stage channels. On a stage the MLS group never
-    # establishes for the bot even once it's an un-suppressed speaker (verified:
-    # `group_formed=False, still_suppressed=False` after a reconnect-as-speaker
-    # retry, which is why that retry was removed — being a speaker isn't
-    # sufficient). Why the group won't form, and whether stage audio is even
-    # DAVE-wrapped, is unresolved; see docs/DAVE.md and probe a live stage with
-    # dave_poc before attempting another fix. Until then, stages capture nothing
-    # and the cog says so.
-    if not await _wait_for_group(mls, 10.0):
-        _log("DAVE group not formed in 10s — recording anyway; it may form once "
-             "audio flows. On a STAGE it likely won't (known limitation): expect "
-             "the cog's liveness check to flag an empty recording within the minute.")
+    # Stage channels don't apply DAVE at all — verified with
+    # dave_poc/poc_stage.py: 0/60 frames carried the 0xFAFA marker and the
+    # transport plaintext Opus-decoded directly (nextcord even logs "Failed to
+    # set up ratchet, encryptor is not initialised"). So on a stage there's no
+    # MLS group to wait for and no per-user ratchet to fetch; _decrypt_packet
+    # decodes the transport audio straight. Normal voice channels DO use DAVE.
+    is_stage = isinstance(voice_channel, nextcord.StageChannel)
+    if is_stage:
+        _log("Stage channel — DAVE not in use here; decoding transport audio directly.")
+    else:
+        mls = _mls_session(voice)
+        if mls is None:
+            await voice.disconnect(force=True)
+            raise RuntimeError(
+                "This connection has no DAVE session. The bot needs nextcord 3.2+ "
+                "with dave-py installed."
+            )
+        # Don't hard-fail if the group is slow — it can form once audio flows, and
+        # the per-packet decrypt picks up the ratchets as soon as it does. Total
+        # failure is caught by the cog (a liveness warning within the minute, and a
+        # plain error at the end instead of chat dressed up as notes).
+        if not await _wait_for_group(mls, 10.0):
+            _log("DAVE group not formed in 10s — recording anyway; it may form "
+                 "once audio starts flowing.")
 
     session = RecordingSession(
         voice_client=voice,
@@ -424,6 +436,7 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
         started_at=datetime.now(),
         attendee_ids={m.id for m in voice_channel.members if not m.bot},
         started_monotonic=time.monotonic(),
+        is_stage=is_stage,
     )
     session.capture_thread = threading.Thread(
         target=_capture_loop, args=(session,), daemon=True

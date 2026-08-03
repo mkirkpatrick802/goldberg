@@ -444,11 +444,10 @@ class Notes(commands.Cog):
         if channel is None:
             return
         await channel.send(
-            "⚠️ I'm in the call and receiving audio, but I can't decrypt any of "
-            "it — so right now I'm recording **nothing**. On a stage this means I "
-            "was never added to the encryption group. Re-adding me as a speaker, "
-            "or moving to a normal voice channel, and restarting should fix it. "
-            "I'll keep trying in case it recovers on its own."
+            "⚠️ I'm in the call and receiving audio, but none of it is making it "
+            "into a recording — so right now I'm capturing **nothing**. That's a "
+            "fault on my end. Someone should check my logs; restarting the "
+            "meeting may clear it. I'll keep trying in case it recovers on its own."
         )
 
     def _notify_channel_for(self, guild_id: int):
@@ -504,13 +503,13 @@ class Notes(commands.Cog):
                     )
                 else:
                     await notify_channel.send(
-                        "Recording stopped, but I couldn't decrypt **any** of the "
-                        "audio I received — every voice packet was unreadable, so I "
-                        "captured nothing. This is the known end-to-end-encryption "
-                        "failure on **stage channels**: I was never added to the "
-                        "encryption group. I did **not** write up notes, because "
-                        "there'd be no meeting behind them. Use a normal voice "
-                        "channel, or re-add me as a speaker, and start again."
+                        "Recording stopped, but I received audio the whole time and "
+                        "couldn't turn a single packet into a recording — so I "
+                        "captured nothing. On a normal voice channel that points to "
+                        "an encryption (DAVE) problem; either way it's a fault on my "
+                        "end, not something you did. I did **not** write up notes, "
+                        "because there'd be no meeting behind them. Worth flagging to "
+                        "whoever runs me — the log has the detail."
                     )
                 return
 
