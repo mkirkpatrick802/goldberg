@@ -50,6 +50,11 @@ ABANDONED = [
 # room for an hour.
 ALONE_GRACE_SECONDS = 60
 
+# How long after recording starts to confirm audio is actually decrypting. Long
+# enough for a real meeting's first words and any late DAVE-group formation,
+# short enough that a stuck stage is caught in the first minute, not after hours.
+LIVENESS_CHECK_SECONDS = 45
+
 # Discord caps a message at 2000 characters; leave headroom.
 MESSAGE_LIMIT = 1900
 
@@ -113,6 +118,8 @@ class Notes(commands.Cog):
         self.notify_channels: dict[int, int] = {}
         # Pending "everyone left" countdowns, one per guild.
         self.alone_timers: dict[int, asyncio.Task] = {}
+        # Early "is any audio actually decrypting?" checks, one per guild.
+        self.liveness_timers: dict[int, asyncio.Task] = {}
         # Forum tag chosen at /takenotes, applied to the post at /stopnotes.
         self.session_tags: dict[int, str] = {}
         # Messages typed in the channel during a meeting: guild -> [(offset, author, text)].
@@ -143,7 +150,11 @@ class Notes(commands.Cog):
         return {m.id for m in people if not m.bot}
 
     def cog_unload(self):
-        for task in (*self.timers.values(), *self.alone_timers.values()):
+        for task in (
+            *self.timers.values(),
+            *self.alone_timers.values(),
+            *self.liveness_timers.values(),
+        ):
             task.cancel()
 
     # ── /takenotes ──────────────────────────────────────────────────────────────
@@ -247,6 +258,7 @@ class Notes(commands.Cog):
         self.sessions[guild_id] = session
         self.notify_channels[guild_id] = interaction.channel.id
         self.timers[guild_id] = asyncio.create_task(self._auto_stop(guild_id))
+        self.liveness_timers[guild_id] = asyncio.create_task(self._liveness_check(guild_id))
         if team:
             self.session_tags[guild_id] = team
 
@@ -403,6 +415,42 @@ class Notes(commands.Cog):
         await channel.send(random.choice(ABANDONED))
         await self._finish(guild_id, channel)
 
+    async def _liveness_check(self, guild_id: int) -> None:
+        """
+        Shortly after recording starts, confirm audio is actually decrypting.
+
+        The recorder can be connected and receiving voice packets yet decrypt
+        none of them — most often on a stage, where the bot never got added to
+        the DAVE encryption group. Left alone that records a full meeting of
+        nothing, discovered only when the empty notes come out. Catch it in the
+        first minute so someone can fix it (re-add the bot, or move to a normal
+        voice channel) and restart.
+        """
+        try:
+            await asyncio.sleep(LIVENESS_CHECK_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        session = self.sessions.get(guild_id)
+        if session is None:
+            return
+        # Packets arriving but no track written = receiving audio and failing to
+        # decrypt all of it. No packets at all is just silence so far, not a
+        # fault — leave that for the end-of-meeting guard.
+        if session.received_packets == 0 or session.tracks:
+            return
+
+        channel = self._notify_channel_for(guild_id)
+        if channel is None:
+            return
+        await channel.send(
+            "⚠️ I'm in the call and receiving audio, but I can't decrypt any of "
+            "it — so right now I'm recording **nothing**. On a stage this means I "
+            "was never added to the encryption group. Re-adding me as a speaker, "
+            "or moving to a normal voice channel, and restarting should fix it. "
+            "I'll keep trying in case it recovers on its own."
+        )
+
     def _notify_channel_for(self, guild_id: int):
         channel_id = self.notify_channels.get(guild_id)
         return self.bot.get_channel(channel_id) if channel_id else None
@@ -424,7 +472,7 @@ class Notes(commands.Cog):
         # current task would raise CancelledError partway through the wrap-up,
         # losing the meeting we just recorded.
         current = asyncio.current_task()
-        for registry in (self.timers, self.alone_timers):
+        for registry in (self.timers, self.alone_timers, self.liveness_timers):
             task = registry.pop(guild_id, None)
             if task is not None and task is not current and not task.done():
                 task.cancel()
@@ -440,12 +488,30 @@ class Notes(commands.Cog):
             session.attendee_ids.update(self._attendees_in(voice_channel))
 
             sources = await recorder.stop(session)
-            if not sources and not chat:
-                await notify_channel.send(
-                    "Recording stopped, but there's nothing to work with — no "
-                    "audio and no chat. Either nobody said or typed a word, or "
-                    "something went wrong on my end."
-                )
+            if not sources:
+                # No audio at all. Do NOT summarize chat-only content and pass it
+                # off as notes — that is exactly how a total recording failure got
+                # dressed up as a real meeting write-up. Say plainly what happened,
+                # and separate "heard nothing" (silence) from "heard plenty but
+                # couldn't decrypt a single packet" (the stage / DAVE-group
+                # failure), since the two need different fixes.
+                if session.received_packets == 0:
+                    await notify_channel.send(
+                        "Recording stopped, but not one voice packet reached me the "
+                        "whole time. Nobody was audible, or the voice connection "
+                        "wasn't delivering audio. I didn't write anything up — there "
+                        "was no meeting to write up."
+                    )
+                else:
+                    await notify_channel.send(
+                        "Recording stopped, but I couldn't decrypt **any** of the "
+                        "audio I received — every voice packet was unreadable, so I "
+                        "captured nothing. This is the known end-to-end-encryption "
+                        "failure on **stage channels**: I was never added to the "
+                        "encryption group. I did **not** write up notes, because "
+                        "there'd be no meeting behind them. Use a normal voice "
+                        "channel, or re-add me as a speaker, and start again."
+                    )
                 return
 
             guild = self.bot.get_guild(guild_id)

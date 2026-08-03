@@ -214,6 +214,10 @@ class RecordingSession:
     frames_seen: dict[int, int] = field(default_factory=dict)
     started_monotonic: float = 0.0
     dropped: int = 0
+    # Audio packets pulled off the capture queue, decryptable or not. Lets the
+    # cog tell "heard nothing" (silence) apart from "heard plenty but couldn't
+    # decrypt a single one" (the stage / DAVE-group failure).
+    received_packets: int = 0
 
 
 def _capture_loop(session: RecordingSession) -> None:
@@ -271,8 +275,7 @@ def _decrypt_packet(session: RecordingSession, arrival: float, data: bytes):
 
     seen = session.frames_seen.get(user_id, 0)
     if user_id not in session.decryptors or seen % DECRYPTOR_BATCH == 0:
-        e2ee = getattr(voice, "e2ee_state", None)
-        mls = getattr(e2ee, "_session", None) if e2ee else None
+        mls = _mls_session(voice)
         if mls is None:
             return None
         ratchet = mls.get_key_ratchet(str(user_id))
@@ -294,6 +297,7 @@ def _drain(session: RecordingSession, budget: int = 400) -> None:
             arrival, data = session.packets.get_nowait()
         except queue.Empty:
             return
+        session.received_packets += 1
         try:
             result = _decrypt_packet(session, arrival, data)
             if result is None:
@@ -319,6 +323,43 @@ async def _drain_loop(session: RecordingSession) -> None:
         pass
 
 
+def _mls_session(voice):
+    """The libdave MLS session behind a voice client, or None if there isn't one."""
+    e2ee = getattr(voice, "e2ee_state", None)
+    return getattr(e2ee, "_session", None) if e2ee else None
+
+
+async def _take_stage(voice_channel, guild) -> None:
+    """
+    On a stage channel, bring the bot up from audience to speaker.
+
+    A suppressed audience member isn't part of the speakers' DAVE encryption
+    group, so it can't decrypt anything. Needs the "Mute Members" permission; if
+    that's missing we say so plainly and carry on — a human can bring the bot up
+    manually. A no-op on a normal voice channel.
+    """
+    if not isinstance(voice_channel, nextcord.StageChannel):
+        return
+    try:
+        await guild.me.edit(suppress=False)
+        _log("Requested speaker status on the stage.")
+    except nextcord.Forbidden:
+        _log("WARNING: can't bring myself onto the stage (missing 'Mute Members'). "
+             "Someone needs to make me a speaker, or the group won't form.")
+    except Exception as e:
+        _log(f"WARNING: couldn't take the stage: {e}")
+
+
+async def _wait_for_group(mls, seconds: float) -> bool:
+    """Poll up to `seconds` for the DAVE/MLS group to establish. Returns whether it did."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if mls.has_established_group():
+            return True
+        await asyncio.sleep(0.5)
+    return mls.has_established_group()
+
+
 async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
     """Join the channel and begin recording one track per speaker."""
     out_dir = Path(out_dir)
@@ -342,45 +383,60 @@ async def start(voice_channel, out_dir: Path, title: str) -> RecordingSession:
         except Exception as e:
             _log(f"Couldn't clear a stale voice client: {e}")
 
-    voice: DaveVoiceClient = await voice_channel.connect(cls=DaveVoiceClient, timeout=60)
-    if not voice.is_connected():
-        raise RuntimeError("Joined the channel but the voice connection never became ready.")
+    # Connect, take the stage if needed, and wait for the DAVE group to form.
+    # Bundled into a local helper because the stage retry below may run it twice.
+    # Leaves guild.me un-suppressed on a stage; returns the client, its MLS
+    # session, and whether the encryption group established.
+    is_stage = isinstance(voice_channel, nextcord.StageChannel)
 
-    # On a stage the bot joins as audience (suppressed). A suppressed listener
-    # isn't a full participant in the speakers' DAVE encryption group, so the
-    # group never forms for us and we can't decrypt. Bring the bot up onto the
-    # stage so it's a real participant. Needs the "Mute Members" permission; if
-    # it's missing, say so plainly — a human can bring the bot up manually.
-    if isinstance(voice_channel, nextcord.StageChannel):
+    async def _establish() -> tuple[DaveVoiceClient, object, bool]:
+        vc: DaveVoiceClient = await voice_channel.connect(cls=DaveVoiceClient, timeout=60)
+        if not vc.is_connected():
+            raise RuntimeError("Joined the channel but the voice connection never became ready.")
+        await _take_stage(voice_channel, guild)
+        mls_session = _mls_session(vc)
+        if mls_session is None:
+            await vc.disconnect(force=True)
+            raise RuntimeError(
+                "This connection has no DAVE session. The bot needs nextcord 3.2+ "
+                "with dave-py installed."
+            )
+        # Don't hard-fail if the group is slow — it can form once audio starts
+        # flowing, and the per-packet decrypt picks up the ratchets as soon as it
+        # does. Total failure is handled downstream (the cog posts a plain error
+        # instead of writing up notes), which beats refusing to record at all.
+        return vc, mls_session, await _wait_for_group(mls_session, 10.0)
+
+    voice, mls, group_formed = await _establish()
+
+    # CANDIDATE STAGE FIX — UNVERIFIED. Verify with dave_poc/ against a live
+    # stage before trusting it; do NOT reason this layer from docs (see
+    # docs/DAVE.md). Observed failure: a 2-hour stage meeting recorded 0 speakers
+    # because the DAVE group never formed for us. The theory: the bot joins a
+    # stage as a suppressed *audience* member, the group forms during that
+    # handshake without us, and the audience->speaker transition from
+    # _take_stage() doesn't re-key us in. Now that guild.me is already an
+    # un-suppressed speaker, drop the connection and reconnect so the whole
+    # handshake runs with us as a speaker from the first message — the way it
+    # already works in a normal voice channel. This only runs when the group
+    # failed to form (an already-broken recording), so it can't regress a
+    # healthy connection. The follow-up log line records what actually happened,
+    # so a live test shows whether the theory holds.
+    if is_stage and not group_formed:
+        _log("Stage DAVE group didn't form on the audience-first connection — "
+             "reconnecting as an established speaker and retrying.")
         try:
-            await guild.me.edit(suppress=False)
-            _log("Requested speaker status on the stage.")
-        except nextcord.Forbidden:
-            _log("WARNING: can't bring myself onto the stage (missing 'Mute Members'). "
-                 "Someone needs to make me a speaker, or the group won't form.")
+            await voice.disconnect(force=True)
         except Exception as e:
-            _log(f"WARNING: couldn't take the stage: {e}")
+            _log(f"Stage retry: disconnect before reconnect failed: {e}")
+        voice, mls, group_formed = await _establish()
+        suppressed = getattr(getattr(guild.me, "voice", None), "suppress", "?")
+        _log(f"Stage retry result: group_formed={group_formed}, still_suppressed={suppressed}")
 
-    e2ee = getattr(voice, "e2ee_state", None)
-    mls = getattr(e2ee, "_session", None) if e2ee else None
-    if mls is None:
-        await voice.disconnect(force=True)
-        raise RuntimeError(
-            "This connection has no DAVE session. The bot needs nextcord 3.2+ "
-            "with dave-py installed."
-        )
-    # Wait for the group, but don't hard-fail if it's slow. It can form later —
-    # e.g. once someone starts speaking on a stage — and the per-packet decrypt
-    # picks up the ratchets as soon as it does. Recording nothing decryptable is
-    # handled downstream (an empty result posts "nobody said a word"), which is
-    # far better than refusing to record at all.
-    for _ in range(20):  # ~10s
-        if mls.has_established_group():
-            break
-        await asyncio.sleep(0.5)
-    if not mls.has_established_group():
-        _log("DAVE group not formed yet — recording anyway; it should form once "
-             "audio starts flowing.")
+    if not group_formed:
+        _log("DAVE group STILL not formed — recording anyway, but on a stage this "
+             "usually means nothing will be decryptable. The cog's liveness check "
+             "will flag it within the minute if no audio comes through.")
 
     session = RecordingSession(
         voice_client=voice,
