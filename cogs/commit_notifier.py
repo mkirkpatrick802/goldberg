@@ -59,11 +59,15 @@ def _get_commit_channel_id():
 async def get_latest_commit():
     """Fetch the latest commit details from SVN."""
 
+    # `svn log` issues a WebDAV REPORT that this server answers in ~9s (far
+    # slower than the lightweight `svn info` request), so an 8s http-timeout
+    # aborted every poll. Give it real headroom; keep the subprocess kill a few
+    # seconds above the http-timeout so svn reports its own error first.
     cmd = [
     "svn", "log", "-l", "1",
     "--xml", "--incremental",
     "--non-interactive",
-    "--config-option", "servers:global:http-timeout=8",
+    "--config-option", "servers:global:http-timeout=30",
     "--trust-server-cert",
     REPO_LINK,
     ]
@@ -74,13 +78,13 @@ async def get_latest_commit():
             cmd,
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=35,
         )
 
     try:
         result = await asyncio.to_thread(run)
     except subprocess.TimeoutExpired:
-        return {"error": "SVN request timed out (10s). Backing off and will retry."}
+        return {"error": "SVN request timed out (35s). Backing off and will retry."}
     except subprocess.CalledProcessError as e:
         return {"error": f"Error fetching commit: {str(e)}"}
     except Exception as e:
@@ -120,6 +124,7 @@ class SvnCommits(commands.Cog):
         self.bot = bot
         self.last_revision = None
         self.backoff_seconds = 0
+        self.svn_down = False
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -150,8 +155,20 @@ class SvnCommits(commands.Cog):
                 return
 
             if "error" in commit_info:
-                await channel.send(commit_info["error"])
+                # Announce the failure once, then stay quiet while retrying so
+                # a persistent SVN outage doesn't spam the channel every cycle.
+                if not self.svn_down:
+                    await channel.send(commit_info["error"])
+                    self.svn_down = True
+                self.increase_backoff()
                 return
+
+            # SVN answered. If we were previously in a failure state, say so and
+            # reset the backoff before carrying on.
+            if self.svn_down:
+                await channel.send("✅ SVN is reachable again.")
+                self.svn_down = False
+                self.backoff_seconds = 0
 
             async for message in channel.history(limit=20):
                 if message.author == self.bot.user:
