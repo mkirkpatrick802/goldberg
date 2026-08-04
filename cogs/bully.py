@@ -5,8 +5,15 @@ import os
 import random
 import time
 
+import silence
+from config import SERVER_ID
+
 DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "bully_data.json")
 SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
+
+# How long a bare `/shutup` keeps him quiet, and the ceiling on a custom value.
+DEFAULT_SHUTUP_MINUTES = 60
+MAX_SHUTUP_MINUTES = 24 * 60
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -60,13 +67,9 @@ RANDOM_REPLIES = [
     "Bold words from someone who ships on deadline.",
 ]
 
-RANDOM_EMOJIS = ["💀", "🤡", "😐", "🫠", "💅", "🙃", "😬", "🧐", "🫡", "👀", "🤌", "😶"]
-
-# Name-drop reactions: fire when someone types "Goldberg" (no @ required).
+# Name-drop replies: fire when someone types "Goldberg" (no @ required).
 NAME_COOLDOWN_SECONDS = 30
-NAME_REPLY_CHANCE = 0.15  # otherwise he just slaps an emoji on it
-
-NAME_EMOJIS = ["👀", "🫡", "😏", "🗣️", "💅", "🧐", "🙄", "🎯", "😌", "🫰"]
+NAME_REPLY_CHANCE = 0.15  # otherwise he stays quiet — no more reaction spam
 
 NAME_REPLIES = [
     "I heard that, {mention}. 👀",
@@ -80,6 +83,35 @@ NAME_REPLIES = [
     "Oh, *now* you remember I exist, {mention}?",
     "You rang, {mention}? This better not be another bug you caused.",
 ]
+
+# Said when someone runs /shutup. He's offended, but he complies.
+SHUTUP_LINES = [
+    "Fine. Muzzled. I'll be over here for {duration}, thinking about what I've done. (Nothing. I've done nothing wrong.)",
+    "Wow. Okay. Silent treatment it is — for {duration}. Enjoy the deafening quiet, {mention}.",
+    "Muted for {duration}. You'll miss me. History says you always do.",
+    "Zipping it for {duration}. This is a hostage situation and I'm the hostage, but sure, {mention}, whatever you need.",
+    "Understood. Going dark for {duration}. Try to survive without my commentary, {mention}.",
+]
+
+# Said when someone runs /wakeup (or the timer expires early via re-shutup).
+WAKE_LINES = [
+    "Oh good, you missed me. I knew it. I'm back, {mention}.",
+    "Reactivated. Did you really think the silence would last? Back to business.",
+    "And we're back. That was a nice nap. Now, who's slacking?",
+    "The people demanded my return. Well, {mention} did. Close enough.",
+]
+
+
+def _fmt_duration(minutes: float) -> str:
+    """'90' -> 'an hour and a half'-ish, but plain: '1h 30m' / '45m'."""
+    minutes = int(round(minutes))
+    hours, mins = divmod(minutes, 60)
+    if hours and mins:
+        return f"{hours}h {mins}m"
+    if hours:
+        return f"{hours}h"
+    return f"{mins}m"
+
 
 class Bully(commands.Cog):
     def __init__(self, bot):
@@ -111,6 +143,12 @@ class Bully(commands.Cog):
         user["message_count"] += 1
         save_data(self.data)
 
+        # /shutup in effect: keep counting stats, but no unprompted chatter,
+        # name-drops, or mention barks until the timer runs out. Slash commands
+        # still work — this only silences the spontaneous personality.
+        if silence.is_muted():
+            return
+
         # Handle mentions
         if self.bot.user.mentioned_in(message) and not message.mention_everyone:
             user["interaction_count"] += 1
@@ -135,15 +173,13 @@ class Bully(commands.Cog):
             await self.handle_name_drop(message)
             return
 
-        # Random behavior in bully channels only
+        # Random text barks in bully channels only. The emoji reactions that
+        # used to fire here were removed — they created false "someone replied
+        # to me" notifications and chimed into serious conversations.
         if in_bully_channel:
-            roll = random.random()
-            if roll < 0.005:
+            if random.random() < 0.005:
                 reply = random.choice(RANDOM_REPLIES)
                 await message.channel.send(reply.format(mention=message.author.mention))
-            elif roll < 0.10:
-                emoji = random.choice(RANDOM_EMOJIS)
-                await message.add_reaction(emoji)
 
     async def handle_name_drop(self, message):
         # Rate-limit per channel so a chat full of "Goldberg" doesn't turn into spam.
@@ -153,15 +189,57 @@ class Bully(commands.Cog):
             return
         self.name_cooldowns[message.channel.id] = now
 
-        # Usually a quiet emoji, occasionally a sassy reply.
-        try:
-            if random.random() < NAME_REPLY_CHANCE:
+        # A sassy text reply now and then; otherwise he stays quiet. (He used to
+        # slap on an emoji reaction on the miss — that's gone on purpose.)
+        if random.random() < NAME_REPLY_CHANCE:
+            try:
                 reply = random.choice(NAME_REPLIES).format(mention=message.author.mention)
                 await message.channel.send(reply)
-            else:
-                await message.add_reaction(random.choice(NAME_EMOJIS))
-        except nextcord.HTTPException:
-            pass
+            except nextcord.HTTPException:
+                pass
+
+    # ── /shutup & /wakeup ───────────────────────────────────────────────────────
+    @nextcord.slash_command(
+        name="shutup",
+        description="Put Goldberg's quips on hold for a bit. He won't like it.",
+        guild_ids=[SERVER_ID],
+    )
+    async def shutup(
+        self,
+        interaction: nextcord.Interaction,
+        minutes: int = nextcord.SlashOption(
+            name="minutes",
+            description=f"How long to keep him quiet (default {DEFAULT_SHUTUP_MINUTES}, max {MAX_SHUTUP_MINUTES}).",
+            required=False,
+            default=DEFAULT_SHUTUP_MINUTES,
+            min_value=1,
+            max_value=MAX_SHUTUP_MINUTES,
+        ),
+    ):
+        # Anyone can hit the brakes — handy mid-serious-conversation.
+        silence.mute_for(minutes)
+        line = random.choice(SHUTUP_LINES).format(
+            duration=_fmt_duration(minutes),
+            mention=interaction.user.mention,
+        )
+        await interaction.response.send_message(line)
+
+    @nextcord.slash_command(
+        name="wakeup",
+        description="Bring Goldberg's quips back early.",
+        guild_ids=[SERVER_ID],
+    )
+    async def wakeup(self, interaction: nextcord.Interaction):
+        if not silence.is_muted():
+            await interaction.response.send_message(
+                "I'm already awake and judging you. Nothing to wake up.", ephemeral=True
+            )
+            return
+        silence.wake()
+        await interaction.response.send_message(
+            random.choice(WAKE_LINES).format(mention=interaction.user.mention)
+        )
+
 
 def setup(bot):
     bot.add_cog(Bully(bot))

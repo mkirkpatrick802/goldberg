@@ -4,32 +4,31 @@ import aiohttp
 import json
 import os
 import random
-from datetime import datetime, date, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config import TAIGA_URL, TAIGA_USERNAME, TAIGA_PASSWORD, TAIGA_PROJECT_SLUG, SERVER_ID
 from utils import get_sheet_members, chunk_message, is_dev, pick_current_milestone
 
-SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 REMINDER_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "reminder_data.json")
 EASTERN = ZoneInfo("America/New_York")
 
-ANNOUNCE_DAYS = {"Tuesday", "Friday", "Sunday"}
-ANNOUNCE_HOUR = 10
-ANNOUNCE_MINUTE = 0
-
-# Personal task-reminder DMs: midpoint Sunday + final Sunday of a 2-week sprint.
-REMINDER_DAY = "Sunday"
+# Personal task-reminder DMs go out every Tuesday, Friday, and Sunday at 10:00
+# ET — the cadence the old public sprint board used, now delivered privately.
+REMINDER_DAYS = {"Tuesday", "Friday", "Sunday"}
 REMINDER_HOUR = 10
 REMINDER_MINUTE = 0
 
-# Goldberg's DM voice — sarcastic, game-dev-flavored, allergic to sounding like a bot.
+# Goldberg's DM voice — sarcastic, game-dev-flavored, allergic to sounding like a
+# bot. Two tones: a gentler "nudge" for the first half of the sprint and an
+# urgent "final" once we're past the midpoint. The exact day/deadline lives in
+# the progress banner, so the intros stay timing-agnostic.
 HALFWAY_INTROS = [
-    "Halfway through **{sprint}** and this is *still* sitting on your plate. I'm not mad. I'm just documenting it for retro.",
-    "We hit the midpoint of **{sprint}**. Half the sprint's gone, and so is my patience. Here's what you still owe me:",
-    "Ding ding - **{sprint}** halfway checkpoint. Perfect time to pretend you were *just about* to start these:",
+    "Reminder: these are *still* sitting on your plate for **{sprint}**. I'm not mad. I'm just documenting it for retro.",
+    "Checking in on **{sprint}**. Here's what you still owe me:",
+    "Perfect time to pretend you were *just about* to start these **{sprint}** tasks:",
     "The board says you've got unfinished business in **{sprint}**. The board doesn't lie. I do. But not about this:",
-    "Week one of **{sprint}** is in the ground. These tasks are not. Curious. Let's fix that:",
+    "These **{sprint}** tasks haven't moved. Curious. Let's fix that:",
 ]
 
 FINAL_INTROS = [
@@ -49,12 +48,6 @@ REMINDER_SIGNOFFS = [
     "Close these or I'm telling everyone you rage quit game dev. 👀",
 ]
 
-def load_setup():
-    if not os.path.exists(SETUP_FILE):
-        return {}
-    with open(SETUP_FILE, "r") as f:
-        return json.load(f)
-
 def load_reminders():
     if not os.path.exists(REMINDER_FILE):
         return {}
@@ -65,16 +58,54 @@ def save_reminders(data):
     with open(REMINDER_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-def reminder_sundays(estimated_finish: str) -> tuple[date, date]:
-    """Given a sprint's estimated_finish ('YYYY-MM-DD'), return the two reminder
-    Sundays: (halfway_sunday, final_sunday). final_sunday is the latest Sunday
-    on-or-before the finish date; halfway_sunday is 7 days earlier."""
-    finish = datetime.strptime(estimated_finish, "%Y-%m-%d").date()
-    # weekday(): Monday=0 ... Sunday=6
-    offset = (finish.weekday() - 6) % 7
-    final_sunday = finish - timedelta(days=offset)
-    halfway_sunday = final_sunday - timedelta(days=7)
-    return halfway_sunday, final_sunday
+def phase_for_sprint(sprint: dict) -> str:
+    """Pick the DM tone from where we are in the sprint: 'final' once we're past
+    the midpoint (deadline pressure), otherwise 'halfway' (a gentler nudge).
+    Defaults to 'halfway' when the sprint has no start/finish dates."""
+    start = sprint.get("estimated_start")
+    finish = sprint.get("estimated_finish")
+    if not start or not finish:
+        return "halfway"
+
+    start_d = datetime.strptime(start, "%Y-%m-%d").date()
+    finish_d = datetime.strptime(finish, "%Y-%m-%d").date()
+    today = datetime.now(EASTERN).date()
+
+    total_days = (finish_d - start_d).days + 1
+    day_number = (today - start_d).days + 1
+    return "final" if day_number > total_days / 2 else "halfway"
+
+
+def sprint_progress_line(sprint: dict) -> str | None:
+    """A one-line 'where are we in the sprint' banner: which day of how many,
+    the deadline date, and how much runway is left. Returns None when the
+    sprint is missing its start/finish dates (nothing useful to show)."""
+    start = sprint.get("estimated_start")
+    finish = sprint.get("estimated_finish")
+    if not start or not finish:
+        return None
+
+    start_d = datetime.strptime(start, "%Y-%m-%d").date()
+    finish_d = datetime.strptime(finish, "%Y-%m-%d").date()
+    today = datetime.now(EASTERN).date()
+
+    total_days = (finish_d - start_d).days + 1  # inclusive of both endpoints
+    day_number = (today - start_d).days + 1
+    day_number = max(1, min(day_number, total_days))  # clamp for display
+    days_left = (finish_d - today).days
+
+    if days_left > 1:
+        runway = f"{days_left} days left"
+    elif days_left == 1:
+        runway = "1 day left"
+    elif days_left == 0:
+        runway = "due today"
+    else:
+        runway = f"{abs(days_left)} day{'s' if abs(days_left) != 1 else ''} overdue"
+
+    # Avoid %-d / %#d — not portable across platforms. Build the date by hand.
+    deadline = f"{finish_d.strftime('%A, %B')} {finish_d.day}"
+    return f"🗓️ **Day {day_number} of {total_days}** · deadline **{deadline}** ({runway})"
 
 class Taiga(commands.Cog):
     def __init__(self, bot):
@@ -84,8 +115,6 @@ class Taiga(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         await self.authenticate()
-        if not self.sprint_update.is_running():
-            self.sprint_update.start()
         if not self.refresh_token.is_running():
             self.refresh_token.start()
         if not self.task_reminder.is_running():
@@ -223,11 +252,15 @@ class Taiga(commands.Cog):
 
         return grouped
 
-    def build_reminder_dm(self, sprint_name: str, phase: str, bucket: dict) -> str:
+    def build_reminder_dm(self, sprint_name: str, phase: str, bucket: dict,
+                          progress: str | None = None) -> str:
         pool = HALFWAY_INTROS if phase == "halfway" else FINAL_INTROS
         intro = random.choice(pool).format(sprint=sprint_name)
 
         lines = [intro, ""]
+        if progress:
+            lines.append(progress)
+            lines.append("")
         if bucket["new"]:
             lines.append("🆕 **New** (haven't even pretended to start these)")
             lines.extend(bucket["new"])
@@ -261,6 +294,7 @@ class Taiga(commands.Cog):
             sprint_tasks = await self.get_sprint_tasks(session, project_id, sprint.get("id"))
 
         sprint_name = sprint.get("name", "Current Sprint")
+        progress = sprint_progress_line(sprint)
         grouped = self.group_unfinished_by_member(sprint_tasks, sheet_data)
 
         guild = self.bot.get_guild(SERVER_ID)
@@ -275,7 +309,7 @@ class Taiga(commands.Cog):
             member = guild.get_member(int(discord_id))
             if not member:
                 continue
-            message = self.build_reminder_dm(sprint_name, phase, bucket)
+            message = self.build_reminder_dm(sprint_name, phase, bucket, progress)
             try:
                 for chunk in chunk_message(message):
                     await member.send(chunk)
@@ -343,38 +377,6 @@ class Taiga(commands.Cog):
 
         return "\n".join(lines)
 
-    @tasks.loop(minutes=1, reconnect=True)
-    async def sprint_update(self):
-        now = datetime.now(EASTERN)
-        if now.strftime("%A") not in ANNOUNCE_DAYS:
-            return
-        if now.hour != ANNOUNCE_HOUR or now.minute != ANNOUNCE_MINUTE:
-            return
-
-        setup = load_setup()
-        channel_id = setup.get("taiga_channel_id")
-        if not channel_id:
-            print("[Taiga] No taiga channel set. Use /setup taigachannel.")
-            return
-
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            return
-
-        try:
-            sheet_data = get_sheet_members()
-        except Exception as e:
-            print(f"[Taiga] Failed to load sheet data: {e}")
-            sheet_data = []
-
-        message = await self.build_sprint_message(sheet_data)
-        for chunk in chunk_message(message):
-            await channel.send(chunk, allowed_mentions=nextcord.AllowedMentions.none())
-
-    @sprint_update.before_loop
-    async def before_sprint_update(self):
-        await self.bot.wait_until_ready()
-
     @tasks.loop(hours=24)
     async def refresh_token(self):
         print("[Taiga] Refreshing auth token...")
@@ -387,9 +389,16 @@ class Taiga(commands.Cog):
     @tasks.loop(minutes=1, reconnect=True)
     async def task_reminder(self):
         now = datetime.now(EASTERN)
-        if now.strftime("%A") != REMINDER_DAY:
+        if now.strftime("%A") not in REMINDER_DAYS:
             return
         if now.hour != REMINDER_HOUR or now.minute != REMINDER_MINUTE:
+            return
+
+        # Fire at most once per calendar day, so a restart during the 10:00
+        # minute can't double-DM everyone.
+        today_str = now.date().isoformat()
+        reminders = load_reminders()
+        if reminders.get("last_sent_date") == today_str:
             return
 
         async with aiohttp.ClientSession() as session:
@@ -398,33 +407,15 @@ class Taiga(commands.Cog):
                 return
             sprint = await self.get_current_sprint(session, project_id)
             if not sprint:
+                print("[Taiga] Reminder: no active sprint; skipping today.")
                 return
 
-        estimated_finish = sprint.get("estimated_finish")
-        if not estimated_finish:
-            print("[Taiga] Reminder: current sprint has no estimated_finish date; skipping.")
-            return
-
-        halfway_sunday, final_sunday = reminder_sundays(estimated_finish)
-        today = now.date()
-        if today == halfway_sunday:
-            phase = "halfway"
-        elif today == final_sunday:
-            phase = "final"
-        else:
-            return
-
-        # Fire once per (sprint, phase), even across restarts.
-        sprint_id = str(sprint.get("id"))
-        reminders = load_reminders()
-        already_sent = reminders.setdefault("sent", {}).setdefault(sprint_id, [])
-        if phase in already_sent:
-            return
-
+        phase = phase_for_sprint(sprint)
         count = await self.send_task_reminders(phase)
-        already_sent.append(phase)
+
+        reminders["last_sent_date"] = today_str
         save_reminders(reminders)
-        print(f"[Taiga] Sent {count} '{phase}' task-reminder DM(s) for sprint {sprint_id}.")
+        print(f"[Taiga] Sent {count} '{phase}' task-reminder DM(s) ({today_str}).")
 
     @task_reminder.before_loop
     async def before_task_reminder(self):
@@ -450,37 +441,6 @@ class Taiga(commands.Cog):
         message = await self.build_sprint_message(sheet_data)
         for chunk in chunk_message(message):
             await interaction.followup.send(chunk, allowed_mentions=nextcord.AllowedMentions.none(), ephemeral=True)
-
-    @nextcord.slash_command(name="test_sprint_update", description="Manually trigger the sprint update.", guild_ids=[SERVER_ID])
-    async def test_sprint_update(self, interaction: nextcord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Admins only.", ephemeral=True)
-            return
-    
-        await interaction.response.defer(ephemeral=True)
-    
-        setup = load_setup()
-        channel_id = setup.get("taiga_channel_id")
-        if not channel_id:
-            await interaction.followup.send("⚠️ No taiga channel set. Use /setup taiga_channel first.", ephemeral=True)
-            return
-    
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            await interaction.followup.send("⚠️ Could not find the taiga channel.", ephemeral=True)
-            return
-    
-        try:
-            sheet_data = get_sheet_members()
-        except Exception as e:
-            await interaction.followup.send(f"⚠️ Failed to load sheet data: {e}", ephemeral=True)
-            return
-    
-        message = await self.build_sprint_message(sheet_data)
-        for chunk in chunk_message(message):
-            await channel.send(chunk, allowed_mentions=nextcord.AllowedMentions.none())
-    
-        await interaction.followup.send("✅ Sprint update sent.", ephemeral=True)
 
     @nextcord.slash_command(name="test_task_reminders", description="Manually send sprint task-reminder DMs now.", guild_ids=[SERVER_ID])
     async def test_task_reminders(
@@ -547,6 +507,10 @@ class Taiga(commands.Cog):
         bucket = grouped.get(user_id, {"new": [], "in_progress": []})
 
         lines = [f"📋 **Your Tasks — {sprint.get('name', 'Current Sprint')}**\n"]
+        progress = sprint_progress_line(sprint)
+        if progress:
+            lines.append(progress)
+            lines.append("")
 
         if bucket["new"]:
             lines.append("🆕 **New**")

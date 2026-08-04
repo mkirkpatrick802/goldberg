@@ -82,20 +82,6 @@ class Setup(commands.Cog):
             ephemeral=True
         )
 
-    @setup_group.subcommand(name="taiga_channel", description="Set the channel for Taiga sprint updates.")
-    async def setup_taiga_channel(self, interaction: nextcord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Admins only.", ephemeral=True)
-            return
-
-        self.config["taiga_channel_id"] = interaction.channel.id
-        save_config(self.config)
-
-        await interaction.response.send_message(
-            f"✅ Taiga sprint updates will now be posted in {interaction.channel.mention}.",
-            ephemeral=True
-        )
-
     @setup_group.subcommand(name="standup_channel", description="Set the channel for stand-up tracking.")
     async def setup_standup_channel(self, interaction: nextcord.Interaction):
         if not interaction.user.guild_permissions.administrator:
@@ -121,6 +107,51 @@ class Setup(commands.Cog):
 
         await interaction.response.send_message(
             f"✅ Sprintly reports will be posted in {interaction.channel.mention}.",
+            ephemeral=True
+        )
+
+    @setup_group.subcommand(name="jtc_channel",
+                            description="Set the Join-to-Create hub voice channel (replaces the channel bot).")
+    async def setup_jtc_channel(
+        self,
+        interaction: nextcord.Interaction,
+        channel: nextcord.VoiceChannel = nextcord.SlashOption(
+            description="The voice channel members join to spawn their own channel.",
+            required=True,
+        ),
+    ):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        self.config["jtc_hub_channel_id"] = channel.id
+        # Created channels land in the hub's own category by default; that's
+        # almost always where you want them, and it keeps setup to one command.
+        self.config["jtc_category_id"] = channel.category_id
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            f"✅ Join-to-Create is on. Anyone who joins {channel.mention} gets their own "
+            f"temporary voice channel, deleted when the last person leaves.",
+            ephemeral=True
+        )
+
+    @setup_group.subcommand(name="jtc_disable", description="Turn off Join-to-Create voice channels.")
+    async def setup_jtc_disable(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        if not self.config.get("jtc_hub_channel_id"):
+            await interaction.response.send_message("Join-to-Create wasn't enabled.", ephemeral=True)
+            return
+
+        self.config.pop("jtc_hub_channel_id", None)
+        self.config.pop("jtc_category_id", None)
+        save_config(self.config)
+
+        await interaction.response.send_message(
+            "✅ Join-to-Create disabled. Existing temporary channels will still be cleaned up when they empty.",
             ephemeral=True
         )
 

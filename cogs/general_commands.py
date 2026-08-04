@@ -118,8 +118,8 @@ class GeneralCommands(commands.Cog):
             inline=False
         )
         embed.add_field(
-            name="✅ /tasks",
-            value="Shows YOUR tasks for the current sprint. The ones you agreed to do. Remember those?",
+            name="✅ /my_tasks",
+            value="Shows YOUR tasks for the current sprint, plus where we are in it. The ones you agreed to do. Remember those?",
             inline=False
         )
         embed.add_field(
@@ -135,6 +135,16 @@ class GeneralCommands(commands.Cog):
         embed.add_field(
             name="🍁 /socials",
             value="Links to everything The Maple Barrel. Follow us. We worked hard on those.",
+            inline=False
+        )
+        embed.add_field(
+            name="🤐 /shutup",
+            value="Puts my quips on hold when you're having a *serious* conversation. Takes optional minutes (default 60). I won't enjoy it.",
+            inline=False
+        )
+        embed.add_field(
+            name="⏰ /wakeup",
+            value="Ends the silent treatment early. You knew you'd miss me.",
             inline=False
         )
         embed.set_footer(text="You're welcome. 💅")

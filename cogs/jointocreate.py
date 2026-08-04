@@ -1,0 +1,142 @@
+import nextcord
+from nextcord.ext import commands
+import json
+import logging
+import os
+
+log = logging.getLogger("jointocreate")
+
+SETUP_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json"))
+# Created-channel ids are written on every join/leave, far more often than the
+# setup config. Keeping them in their own file avoids two cogs racing to
+# rewrite setup_data.json and clobbering each other.
+STATE_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "jtc_state.json"))
+
+
+def load_setup_config():
+    if not os.path.exists(SETUP_FILE):
+        return {}
+    with open(SETUP_FILE, "r") as f:
+        return json.load(f)
+
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {"created_channels": []}
+    with open(STATE_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_state(data):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+class JoinToCreate(commands.Cog):
+    """Replaces the channel bot's 'Join to Create' voice channels.
+
+    When a member joins the configured hub channel, the bot spawns a personal
+    voice channel, moves them into it, and deletes it once the last person
+    leaves. Unlike the external channel bot, this rides the bot's own uptime —
+    no extra service to go down.
+    """
+
+    def __init__(self, bot):
+        self.bot = bot
+        state = load_state()
+        # Channels this cog created and is responsible for cleaning up.
+        self._created = set(state.get("created_channels", []))
+
+    def _persist(self):
+        save_state({"created_channels": sorted(self._created)})
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Reconcile after a restart.
+
+        If the bot went down while temporary channels were live, some may now be
+        empty (or already gone). Sweep them so a restart doesn't leave orphans.
+        """
+        for channel_id in list(self._created):
+            channel = self.bot.get_channel(channel_id)
+            if channel is None:
+                self._created.discard(channel_id)
+                continue
+            if not [m for m in channel.members if not m.bot]:
+                await self._delete_channel(channel, reason="Join-to-Create: empty on startup")
+        self._persist()
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot:
+            return
+
+        # Mute/deafen/stream toggles fire this event without changing channel.
+        if before.channel == after.channel:
+            return
+
+        # ── Someone left a temp channel: delete it if it's now empty ────────────
+        if before.channel is not None and before.channel.id in self._created:
+            if not [m for m in before.channel.members if not m.bot]:
+                await self._delete_channel(before.channel, reason="Join-to-Create: last member left")
+                self._persist()
+
+        # ── Someone joined the hub: give them their own channel ─────────────────
+        if after.channel is not None:
+            setup = load_setup_config()
+            hub_id = setup.get("jtc_hub_channel_id")
+            if hub_id and after.channel.id == hub_id:
+                await self._create_for(member, after.channel, setup)
+
+    async def _create_for(self, member, hub_channel, setup):
+        guild = hub_channel.guild
+        category = guild.get_channel(setup.get("jtc_category_id")) or hub_channel.category
+
+        # Let the owner manage their own channel (rename, set a user limit, drag
+        # people in) the way the channel bot did.
+        overwrites = {
+            member: nextcord.PermissionOverwrite(
+                manage_channels=True,
+                move_members=True,
+                connect=True,
+            )
+        }
+        try:
+            new_channel = await guild.create_voice_channel(
+                name=f"{member.display_name}'s Channel",
+                category=category,
+                overwrites=overwrites,
+                reason=f"Join-to-Create for {member} ({member.id})",
+            )
+        except nextcord.Forbidden:
+            log.error("Missing Manage Channels permission — can't create Join-to-Create channel for %s", member)
+            return
+        except nextcord.HTTPException as e:
+            log.error("Failed to create Join-to-Create channel for %s: %s", member, e)
+            return
+
+        self._created.add(new_channel.id)
+        self._persist()
+
+        try:
+            await member.move_to(new_channel, reason="Join-to-Create")
+        except (nextcord.Forbidden, nextcord.HTTPException) as e:
+            # The member disconnected before we could move them, or the bot lacks
+            # Move Members. Either way the fresh channel is empty and useless.
+            log.warning("Couldn't move %s into their channel (%s); cleaning it up", member, e)
+            await self._delete_channel(new_channel, reason="Join-to-Create: move failed")
+            self._persist()
+
+    async def _delete_channel(self, channel, reason):
+        self._created.discard(channel.id)
+        try:
+            await channel.delete(reason=reason)
+        except nextcord.NotFound:
+            pass
+        except (nextcord.Forbidden, nextcord.HTTPException) as e:
+            log.error("Failed to delete Join-to-Create channel %s: %s", channel.id, e)
+
+
+def setup(bot):
+    bot.add_cog(JoinToCreate(bot))
