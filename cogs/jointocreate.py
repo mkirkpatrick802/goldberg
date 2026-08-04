@@ -34,12 +34,11 @@ def save_state(data):
 
 
 class JoinToCreate(commands.Cog):
-    """Replaces the channel bot's 'Join to Create' voice channels.
+    """'Join to Create' voice channels.
 
-    When a member joins the configured hub channel, the bot spawns a personal
+    When a member joins a configured hub channel, the bot spawns a personal
     voice channel, moves them into it, and deletes it once the last person
-    leaves. Unlike the external channel bot, this rides the bot's own uptime —
-    no extra service to go down.
+    leaves.
     """
 
     def __init__(self, bot):
@@ -82,19 +81,22 @@ class JoinToCreate(commands.Cog):
                 await self._delete_channel(before.channel, reason="Join-to-Create: last member left")
                 self._persist()
 
-        # ── Someone joined the hub: give them their own channel ─────────────────
+        # ── Someone joined a hub: give them their own channel ────────────────────
         if after.channel is not None:
             setup = load_setup_config()
-            hub_id = setup.get("jtc_hub_channel_id")
-            if hub_id and after.channel.id == hub_id:
-                await self._create_for(member, after.channel, setup)
+            hub = next(
+                (h for h in setup.get("jtc_hubs", []) if h.get("hub_channel_id") == after.channel.id),
+                None,
+            )
+            if hub:
+                await self._create_for(member, after.channel, hub)
 
-    async def _create_for(self, member, hub_channel, setup):
+    async def _create_for(self, member, hub_channel, hub):
         guild = hub_channel.guild
-        category = guild.get_channel(setup.get("jtc_category_id")) or hub_channel.category
+        category = guild.get_channel(hub.get("category_id")) or hub_channel.category
 
-        # Let the owner manage their own channel (rename, set a user limit, drag
-        # people in) the way the channel bot did.
+        # Let the owner manage their own channel: rename it, set a user limit,
+        # drag people in.
         overwrites = {
             member: nextcord.PermissionOverwrite(
                 manage_channels=True,

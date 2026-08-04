@@ -22,6 +22,22 @@ class Setup(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = load_config()
+        self._migrate_jtc_hubs()
+
+    def _migrate_jtc_hubs(self):
+        """Fold the old single-hub keys into the jtc_hubs list, one time.
+
+        Pre-multi-hub configs stored one hub as jtc_hub_channel_id /
+        jtc_category_id. Converting on load means jointocreate.py only ever
+        has to deal with the list format.
+        """
+        if "jtc_hubs" in self.config:
+            return
+        old_hub = self.config.pop("jtc_hub_channel_id", None)
+        old_category = self.config.pop("jtc_category_id", None)
+        if old_hub:
+            self.config["jtc_hubs"] = [{"hub_channel_id": old_hub, "category_id": old_category}]
+            save_config(self.config)
 
     @nextcord.slash_command(name="setup", description="Goldberg setup commands.", guild_ids=[SERVER_ID])
     async def setup_group(self, interaction: nextcord.Interaction):
@@ -111,7 +127,7 @@ class Setup(commands.Cog):
         )
 
     @setup_group.subcommand(name="jtc_channel",
-                            description="Set the Join-to-Create hub voice channel (replaces the channel bot).")
+                            description="Add a Join-to-Create hub voice channel.")
     async def setup_jtc_channel(
         self,
         interaction: nextcord.Interaction,
@@ -124,34 +140,52 @@ class Setup(commands.Cog):
             await interaction.response.send_message("Admins only.", ephemeral=True)
             return
 
-        self.config["jtc_hub_channel_id"] = channel.id
+        hubs = self.config.setdefault("jtc_hubs", [])
+        if any(h["hub_channel_id"] == channel.id for h in hubs):
+            await interaction.response.send_message(
+                f"{channel.mention} is already a Join-to-Create hub.", ephemeral=True
+            )
+            return
+
         # Created channels land in the hub's own category by default; that's
         # almost always where you want them, and it keeps setup to one command.
-        self.config["jtc_category_id"] = channel.category_id
+        hubs.append({"hub_channel_id": channel.id, "category_id": channel.category_id})
         save_config(self.config)
 
         await interaction.response.send_message(
-            f"✅ Join-to-Create is on. Anyone who joins {channel.mention} gets their own "
-            f"temporary voice channel, deleted when the last person leaves.",
+            f"✅ Join-to-Create is on for {channel.mention}. Anyone who joins it gets their own "
+            f"temporary voice channel, deleted when the last person leaves. "
+            f"({len(hubs)} hub{'s' if len(hubs) != 1 else ''} configured.)",
             ephemeral=True
         )
 
-    @setup_group.subcommand(name="jtc_disable", description="Turn off Join-to-Create voice channels.")
-    async def setup_jtc_disable(self, interaction: nextcord.Interaction):
+    @setup_group.subcommand(name="jtc_disable", description="Turn off a Join-to-Create hub voice channel.")
+    async def setup_jtc_disable(
+        self,
+        interaction: nextcord.Interaction,
+        channel: nextcord.VoiceChannel = nextcord.SlashOption(
+            description="The hub channel to disable.",
+            required=True,
+        ),
+    ):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Admins only.", ephemeral=True)
             return
 
-        if not self.config.get("jtc_hub_channel_id"):
-            await interaction.response.send_message("Join-to-Create wasn't enabled.", ephemeral=True)
+        hubs = self.config.get("jtc_hubs", [])
+        remaining = [h for h in hubs if h["hub_channel_id"] != channel.id]
+        if len(remaining) == len(hubs):
+            await interaction.response.send_message(
+                f"{channel.mention} isn't a Join-to-Create hub.", ephemeral=True
+            )
             return
 
-        self.config.pop("jtc_hub_channel_id", None)
-        self.config.pop("jtc_category_id", None)
+        self.config["jtc_hubs"] = remaining
         save_config(self.config)
 
         await interaction.response.send_message(
-            "✅ Join-to-Create disabled. Existing temporary channels will still be cleaned up when they empty.",
+            f"✅ Join-to-Create disabled for {channel.mention}. Existing temporary channels will still "
+            f"be cleaned up when they empty.",
             ephemeral=True
         )
 
