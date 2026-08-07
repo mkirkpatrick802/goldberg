@@ -95,15 +95,20 @@ class JoinToCreate(commands.Cog):
         guild = hub_channel.guild
         category = guild.get_channel(hub.get("category_id")) or hub_channel.category
 
+        # Passing `overwrites` to create_voice_channel replaces the normal
+        # category-sync behavior entirely, so without this the temp channel
+        # would fall back to bare @everyone permissions and ignore whatever
+        # role restrictions the category/hub actually have.
+        overwrites = {}
+        if category is not None:
+            overwrites.update(category.overwrites)
+        overwrites.update(hub_channel.overwrites)
+
         # Let the owner manage their own channel: rename it, set a user limit,
         # drag people in.
-        overwrites = {
-            member: nextcord.PermissionOverwrite(
-                manage_channels=True,
-                move_members=True,
-                connect=True,
-            )
-        }
+        owner_overwrite = overwrites.get(member, nextcord.PermissionOverwrite())
+        owner_overwrite.update(manage_channels=True, move_members=True, connect=True)
+        overwrites[member] = owner_overwrite
         try:
             new_channel = await guild.create_voice_channel(
                 name=f"{member.display_name}'s Channel",
