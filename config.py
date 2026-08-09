@@ -15,7 +15,12 @@ BOT_TOKEN               = _require("BOT_TOKEN")
 SERVER_ID               = int(_require("SERVER_ID"))
 
 #Repo Info
-REPO_LINK               = _require("REPO_LINK")
+# REPO_LINK is no longer the single repo the bot watches — commit_notifier and
+# telemetry now poll every project in the wiki registry that has a repo link
+# set (see utils.get_watched_projects). Kept as an optional fallback so an
+# existing single-repo deployment doesn't go quiet the moment this rolls out,
+# until someone creates the first project on the webapp's Wiki page.
+REPO_LINK               = os.getenv("REPO_LINK", "")
 REPO_SIGNUP_LINK        = _require("REPO_SIGNUP_LINK")
 
 #Office Hour Info

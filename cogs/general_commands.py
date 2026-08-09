@@ -4,7 +4,23 @@ import nextcord
 from nextcord.ext import commands
 
 from config import SERVER_ID
-from utils import is_dev
+from utils import is_dev, get_company_links
+
+# Fallback for a fresh migration where nobody's populated Company Info yet —
+# same links this command always had, kept only so /socials doesn't go blank.
+# Safe to delete once the "Socials" group on the Wiki page has real rows.
+_SOCIALS_FALLBACK = [
+    {"label": "🌐 Website",   "url": "https://www.themaplebarrel.com/",
+     "note": "The mothership."},
+    {"label": "📸 Instagram", "url": "https://www.instagram.com/themaplebarrel/",
+     "note": "Pretty pictures. Very professional."},
+    {"label": "▶️ YouTube",   "url": "https://www.youtube.com/@TheMapleBarrel",
+     "note": "Videos. Some of them are even good."},
+    {"label": "🎗️ Patreon",  "url": "https://www.patreon.com/TheMapleBarrel",
+     "note": "Support the chaos. Financially."},
+    {"label": "💼 LinkedIn",  "url": "https://www.linkedin.com/company/the-maple-barrel",
+     "note": "For when we're pretending to be professionals."},
+]
 
 
 class GeneralCommands(commands.Cog):
@@ -43,20 +59,19 @@ class GeneralCommands(commands.Cog):
             description="Yes, we exist on the internet. Multiple places, actually. Try not to be weird about it.",
             color=0xc8521a
         )
-        embed.add_field(name="🌐 Website",
-                        value="[themaplebarrel.com](https://www.themaplebarrel.com/) — The mothership.", inline=False)
-        embed.add_field(name="📸 Instagram",
-                        value="[@themaplebarrel](https://www.instagram.com/themaplebarrel/) — Pretty pictures. Very professional.",
-                        inline=False)
-        embed.add_field(name="▶️ YouTube",
-                        value="[@TheMapleBarrel](https://www.youtube.com/@TheMapleBarrel) — Videos. Some of them are even good.",
-                        inline=False)
-        embed.add_field(name="🎗️ Patreon",
-                        value="[TheMapleBarrel](https://www.patreon.com/TheMapleBarrel) — Support the chaos. Financially.",
-                        inline=False)
-        embed.add_field(name="💼 LinkedIn",
-                        value="[The Maple Barrel](https://www.linkedin.com/company/the-maple-barrel) — For when we're pretending to be professionals.",
-                        inline=False)
+
+        # Reads the "Socials" group of Company Info links off the webapp's wiki
+        # page, so updating a link is an owner edit there instead of a bot
+        # redeploy. Falls back to the original hardcoded list if that group is
+        # empty (fresh migration, or the shared database is unreachable).
+        links = get_company_links(group_name="Socials")
+        if links:
+            for l in links:
+                embed.add_field(name=l["label"], value=f"[Open]({l['url']})", inline=False)
+        else:
+            for l in _SOCIALS_FALLBACK:
+                embed.add_field(name=l["label"], value=f"[Open]({l['url']}) — {l['note']}", inline=False)
+
         embed.set_footer(text="Follow us or don't. I'm a bot, not a publicist.")
         await interaction.response.send_message(embed=embed)
 

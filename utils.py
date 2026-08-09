@@ -116,6 +116,66 @@ def _members_from_sheet() -> list[dict]:
     return members
 
 
+def _wiki_db():
+    """shared/wiki_db.py, imported lazily the same way _members_from_database() is."""
+    if _SHARED_DIR not in sys.path:
+        sys.path.insert(0, _SHARED_DIR)
+    import wiki_db
+    return wiki_db
+
+
+def get_company_links(group_name: str | None = None) -> list[dict]:
+    """
+    Company Info links from the webapp's wiki registry (shared/wiki_db.py),
+    optionally filtered to one group (e.g. "Socials"). Returns [] rather than
+    raising if the shared database isn't reachable, so callers can fall back
+    to a hardcoded default instead of erroring out a command.
+    """
+    try:
+        links = _wiki_db().get_company_links()
+    except Exception as e:
+        print(f"[Wiki] Company links unavailable: {type(e).__name__}: {e}")
+        return []
+    if group_name is None:
+        return links
+    return [l for l in links if l["group_name"] == group_name]
+
+
+def get_repo_projects() -> list[dict]:
+    """
+    Active (non-archived) projects that have a repo link set — what
+    commit_notifier.py and telemetry.py watch instead of one global REPO_LINK.
+    Returns [] if the shared database isn't reachable.
+    """
+    try:
+        projects = _wiki_db().get_projects(include_archived=False)
+    except Exception as e:
+        print(f"[Wiki] Projects unavailable: {type(e).__name__}: {e}")
+        return []
+    return [p for p in projects if p.get("repo_link")]
+
+
+def get_watched_projects() -> list[dict]:
+    """
+    [{"id", "name", "repo_link"}, ...] for every repo commit_notifier and
+    telemetry should poll.
+
+    Prefers the wiki registry; falls back to a single synthetic "Repo" entry
+    built from the legacy REPO_LINK env var when the registry has nothing yet
+    (fresh migration, or the shared database isn't reachable) so an existing
+    deployment doesn't go quiet the moment this rolls out.
+    """
+    projects = get_repo_projects()
+    if projects:
+        return [{"id": p["id"], "name": p["name"], "repo_link": p["repo_link"]}
+                for p in projects]
+
+    from config import REPO_LINK
+    if REPO_LINK:
+        return [{"id": "legacy", "name": "Repo", "repo_link": REPO_LINK}]
+    return []
+
+
 def get_sheet_members() -> list[dict]:
     """
     Return all active members from whichever source is configured.

@@ -9,8 +9,8 @@ import os
 import subprocess
 import xml.etree.ElementTree as ET
 
-from config import SERVER_ID, TAIGA_URL, TAIGA_PROJECT_SLUG, REPO_LINK
-from utils import get_sheet_members, pick_current_milestone
+from config import SERVER_ID, TAIGA_URL, TAIGA_PROJECT_SLUG
+from utils import get_sheet_members, pick_current_milestone, get_watched_projects
 
 TELEMETRY_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "telemetry.json"))
 SETUP_FILE     = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json"))
@@ -110,9 +110,9 @@ _SVN_BASE_FLAGS = [
 ]
 
 
-def _run_svn(args, timeout):
+def _run_svn(args, timeout, repo_link):
     result = subprocess.run(
-        ["svn", *args, *_SVN_BASE_FLAGS, REPO_LINK],
+        ["svn", *args, *_SVN_BASE_FLAGS, repo_link],
         text=True, capture_output=True, timeout=timeout,
     )
     if result.returncode != 0:
@@ -120,12 +120,12 @@ def _run_svn(args, timeout):
     return result.stdout
 
 
-def svn_head_revision():
+def svn_head_revision(repo_link):
     """The repo's current revision number."""
-    return int(_run_svn(["info", "--show-item", "revision"], timeout=15).strip())
+    return int(_run_svn(["info", "--show-item", "revision"], timeout=15, repo_link=repo_link).strip())
 
 
-def svn_log_from(revision):
+def svn_log_from(revision, repo_link):
     """
     Every commit from `revision` through HEAD as (revision, author) pairs.
 
@@ -133,7 +133,7 @@ def svn_log_from(revision):
     which SVN rejects once we've caught up to HEAD. The caller drops the
     first entry, having already counted it.
     """
-    out = _run_svn(["log", "-r", f"{revision}:HEAD", "--xml"], timeout=30)
+    out = _run_svn(["log", "-r", f"{revision}:HEAD", "--xml"], timeout=30, repo_link=repo_link)
     entries = []
     for entry in ET.fromstring(out).findall("logentry"):
         author = entry.find("author")
@@ -387,39 +387,26 @@ class Telemetry(commands.Cog):
     @ext_tasks.loop(minutes=SVN_CHECK_MINUTES)
     async def check_svn_commits(self):
         """
-        Count commits per member for the current sprint.
+        Count commits per member for the current sprint, across every project
+        that has a repo link (see utils.get_watched_projects) — each member's
+        total is summed across every repo they commit to rather than broken
+        out per project, so no telemetry.json schema change was needed there.
 
-        Progress is a revision high-water mark in telemetry.json, so restarts
-        and failed polls never double-count or skip: a failure leaves the mark
-        untouched and the next tick re-reads the same range.
+        Progress is a revision high-water mark PER PROJECT in
+        last_commit_revisions, so restarts and failed polls never double-count
+        or skip: a failure leaves that project's mark untouched and the next
+        tick re-reads the same range, independently of every other project.
+
+        Saved after each project rather than batched at the end, so one
+        project's progress is never lost if a later project's SVN call yields
+        control and a concurrent listener (voice/stand-up) writes the file.
         """
         data = load_telemetry()
         if not data.get("current_sprint"):
             return
 
-        last_rev = data.get("last_commit_revision")
-
-        # First run: start counting at HEAD rather than replaying the repo's
-        # entire history into whichever sprint happens to be open.
-        if last_rev is None:
-            try:
-                head = await asyncio.to_thread(svn_head_revision)
-            except Exception as e:
-                print(f"[Telemetry] Could not read SVN head revision: {e}")
-                return
-            data["last_commit_revision"] = head
-            save_telemetry(data)
-            print(f"[Telemetry] Commit tracking baseline set to r{head}")
-            return
-
-        try:
-            entries = await asyncio.to_thread(svn_log_from, last_rev)
-        except Exception as e:
-            print(f"[Telemetry] SVN log failed (will retry from r{last_rev}): {e}")
-            return
-
-        new = [(rev, author) for rev, author in entries if rev > last_rev]
-        if not new:
+        projects = get_watched_projects()
+        if not projects:
             return
 
         # SVN usernames are account usernames — the same credential Apache
@@ -430,24 +417,66 @@ class Telemetry(commands.Cog):
             if m.get("username") and m.get("discord_id")
         }
 
-        # Re-read: the SVN call above yielded, and the voice/stand-up listeners
-        # write this same file.
-        data   = load_telemetry()
-        sprint = data.get("current_sprint")
-        if not sprint:
-            return
+        for proj in projects:
+            key = str(proj["id"])
+            data = load_telemetry()
+            if not data.get("current_sprint"):
+                return
+            revisions = data.setdefault("last_commit_revisions", {})
 
-        for rev, author in new:
-            discord_id = by_username.get(author.lower())
-            if not discord_id:
-                print(f"[Telemetry] r{rev}: no active account for SVN user '{author}'")
+            # One-time migration from the single-repo scalar this used to be —
+            # only meaningful when there's exactly one watched repo, since
+            # with several there's no way to know which one the old baseline
+            # belonged to. Anything else starts fresh at its own HEAD below.
+            legacy_rev = data.pop("last_commit_revision", None)
+            if legacy_rev is not None and len(projects) == 1 and key not in revisions:
+                revisions[key] = legacy_rev
+                save_telemetry(data)
+
+            last_rev = revisions.get(key)
+
+            # First run for this project: start counting at HEAD rather than
+            # replaying its entire history into whichever sprint is open.
+            if last_rev is None:
+                try:
+                    head = await asyncio.to_thread(svn_head_revision, proj["repo_link"])
+                except Exception as e:
+                    print(f"[Telemetry] {proj['name']}: could not read SVN head revision: {e}")
+                    continue
+                revisions[key] = head
+                save_telemetry(data)
+                print(f"[Telemetry] {proj['name']}: commit tracking baseline set to r{head}")
                 continue
-            ensure_user(data, sprint, discord_id)
-            data["sprints"][sprint][discord_id]["commits"] += 1
-            print(f"[Telemetry] r{rev} counted for {author}")
 
-        data["last_commit_revision"] = max(rev for rev, _ in new)
-        save_telemetry(data)
+            try:
+                entries = await asyncio.to_thread(svn_log_from, last_rev, proj["repo_link"])
+            except Exception as e:
+                print(f"[Telemetry] {proj['name']}: SVN log failed (will retry from r{last_rev}): {e}")
+                continue
+
+            new = [(rev, author) for rev, author in entries if rev > last_rev]
+            if not new:
+                continue
+
+            # Re-read: the SVN call above yielded, and the voice/stand-up
+            # listeners write this same file.
+            data   = load_telemetry()
+            sprint = data.get("current_sprint")
+            if not sprint:
+                return
+            revisions = data.setdefault("last_commit_revisions", {})
+
+            for rev, author in new:
+                discord_id = by_username.get(author.lower())
+                if not discord_id:
+                    print(f"[Telemetry] {proj['name']} r{rev}: no active account for SVN user '{author}'")
+                    continue
+                ensure_user(data, sprint, discord_id)
+                data["sprints"][sprint][discord_id]["commits"] += 1
+                print(f"[Telemetry] {proj['name']} r{rev} counted for {author}")
+
+            revisions[key] = max(rev for rev, _ in new)
+            save_telemetry(data)
 
     @check_svn_commits.before_loop
     async def before_check_svn_commits(self):
