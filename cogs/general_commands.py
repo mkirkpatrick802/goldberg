@@ -175,7 +175,7 @@ class GeneralCommands(commands.Cog):
                                                     ephemeral=True)
             return
         await interaction.response.send_message(
-            "📦 **Game Builds**\nDownload the latest playable build here:\nhttps://themapleserver.themaplebarrel.com/builds/",
+            "📦 **Game Builds**\nDownload the latest playable build here:\nhttps://themapleserver.themaplebarrel.com/builds",
             ephemeral=True
         )
 
