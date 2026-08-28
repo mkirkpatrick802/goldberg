@@ -150,6 +150,9 @@ class Telemetry(commands.Cog):
         self.taiga_token = None
         # Track when each user joined a voice channel: {member_id: datetime}
         self._voice_join_times = {}
+        # One-shot latch so check_svn_commits reports having nothing to poll
+        # once, rather than every SVN_CHECK_MINUTES.
+        self._warned_no_repos = False
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -407,7 +410,21 @@ class Telemetry(commands.Cog):
 
         projects = get_watched_projects()
         if not projects:
+            # Nothing to poll: no active wiki project has a repo_link and the
+            # legacy REPO_LINK fallback is empty. This used to return in
+            # silence, which is how commit tracking sat dormant for whole
+            # sprints while the dashboard showed a column of zeroes that looked
+            # like real "nobody committed" data. Say it once per process so the
+            # log names the cause without repeating every SVN_CHECK_MINUTES.
+            if not self._warned_no_repos:
+                self._warned_no_repos = True
+                print("[Telemetry] Commit tracking is idle: no active project has a "
+                      "repo link set (Wiki -> Projects), and REPO_LINK is unset. "
+                      "Commits will read as untracked until one is configured.")
             return
+
+        # A repo showed up — let the warning fire again if they all go away.
+        self._warned_no_repos = False
 
         # SVN usernames are account usernames — the same credential Apache
         # authenticates against — so an author maps straight to a member.
