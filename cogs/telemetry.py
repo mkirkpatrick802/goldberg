@@ -105,14 +105,32 @@ def _session_record(data, session_key):
 
 _SVN_BASE_FLAGS = [
     "--non-interactive",
-    "--config-option", "servers:global:http-timeout=8",
     "--trust-server-cert",
 ]
 
+# The two calls below need different patience, so http-timeout is per-call
+# rather than shared.
+#
+# `svn info` is a lightweight request this server answers in about a second.
+# `svn log` issues a WebDAV REPORT it answers in ~9s — and the range query here
+# is heavier than commit_notifier's `-l 1`, which already had to be raised to
+# 30s for exactly this reason. Both calls used to share an 8s timeout, which
+# meant `svn info` succeeded and wrote a baseline into last_commit_revisions
+# while every subsequent `svn log` aborted: the mark never advanced past the
+# baseline and every member's commit count sat at zero, looking for all the
+# world like nobody was committing.
+#
+# Keep each subprocess kill a few seconds above its http-timeout so svn reports
+# its own error instead of being killed mid-request.
+_HTTP_TIMEOUT_INFO = 8
+_HTTP_TIMEOUT_LOG  = 30
 
-def _run_svn(args, timeout, repo_link):
+
+def _run_svn(args, timeout, repo_link, http_timeout):
     result = subprocess.run(
-        ["svn", *args, *_SVN_BASE_FLAGS, repo_link],
+        ["svn", *args,
+         "--config-option", f"servers:global:http-timeout={http_timeout}",
+         *_SVN_BASE_FLAGS, repo_link],
         text=True, capture_output=True, timeout=timeout,
     )
     if result.returncode != 0:
@@ -122,7 +140,9 @@ def _run_svn(args, timeout, repo_link):
 
 def svn_head_revision(repo_link):
     """The repo's current revision number."""
-    return int(_run_svn(["info", "--show-item", "revision"], timeout=15, repo_link=repo_link).strip())
+    return int(_run_svn(["info", "--show-item", "revision"], timeout=15,
+                        repo_link=repo_link,
+                        http_timeout=_HTTP_TIMEOUT_INFO).strip())
 
 
 def svn_log_from(revision, repo_link):
@@ -133,7 +153,8 @@ def svn_log_from(revision, repo_link):
     which SVN rejects once we've caught up to HEAD. The caller drops the
     first entry, having already counted it.
     """
-    out = _run_svn(["log", "-r", f"{revision}:HEAD", "--xml"], timeout=30, repo_link=repo_link)
+    out = _run_svn(["log", "-r", f"{revision}:HEAD", "--xml"], timeout=35,
+                   repo_link=repo_link, http_timeout=_HTTP_TIMEOUT_LOG)
     entries = []
     for entry in ET.fromstring(out).findall("logentry"):
         author = entry.find("author")
