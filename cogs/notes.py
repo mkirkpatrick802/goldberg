@@ -55,6 +55,16 @@ ALONE_GRACE_SECONDS = 60
 # short enough that a stuck stage is caught in the first minute, not after hours.
 LIVENESS_CHECK_SECONDS = 45
 
+# How long to wait for nextcord to get the bot back into the channel after the
+# voice websocket drops (close code 1006 — a network blip, seen mid-meeting
+# more than once). nextcord leaves and rejoins on its own; the rejoin is usually
+# ~1s, but a handshake that times out takes 60s before it retries. If the bot
+# was actually kicked, nextcord gives up and drops the voice client, which is
+# spotted within a couple of seconds — this ceiling only applies to a rejoin
+# that never completes.
+RECONNECT_GRACE_SECONDS = 90
+RECONNECT_POLL_SECONDS = 2
+
 # Discord caps a message at 2000 characters; leave headroom.
 MESSAGE_LIMIT = 1900
 
@@ -120,6 +130,8 @@ class Notes(commands.Cog):
         self.alone_timers: dict[int, asyncio.Task] = {}
         # Early "is any audio actually decrypting?" checks, one per guild.
         self.liveness_timers: dict[int, asyncio.Task] = {}
+        # "The bot left — is it a reconnect or a kick?" watches, one per guild.
+        self.rejoin_timers: dict[int, asyncio.Task] = {}
         # Forum tag chosen at /takenotes, applied to the post at /stopnotes.
         self.session_tags: dict[int, str] = {}
         # Messages typed in the channel during a meeting: guild -> [(offset, author, text)].
@@ -154,6 +166,7 @@ class Notes(commands.Cog):
             *self.timers.values(),
             *self.alone_timers.values(),
             *self.liveness_timers.values(),
+            *self.rejoin_timers.values(),
         ):
             task.cancel()
 
@@ -354,17 +367,25 @@ class Notes(commands.Cog):
             return
         guild_id = member.guild.id
 
-        # The bot itself was disconnected, kicked, or moved elsewhere.
+        # The bot itself left the channel — or came back to it.
+        #
+        # Leaving is NOT necessarily a kick. When the voice websocket drops
+        # (a network blip, close code 1006) nextcord reconnects on its own, and
+        # that reconnect is a visible leave followed by a rejoin a second or so
+        # later. Ending the recording on the leave turns every blip into a
+        # meeting cut in half. So: on a leave, start watching; on a rejoin,
+        # stop watching and carry on. Only a leave that isn't followed by a
+        # rejoin gets treated as being yanked out.
         if self.bot.user is not None and member.id == self.bot.user.id:
             still_here = after.channel is not None and after.channel.id == session.channel_id
-            if not still_here:
-                channel = self._notify_channel_for(guild_id)
-                if channel is not None:
-                    await channel.send(
-                        "I got yanked out of the voice channel mid-meeting. "
-                        "Salvaging what I recorded."
-                    )
-                    await self._finish(guild_id, channel)
+            pending = self.rejoin_timers.get(guild_id)
+            if still_here:
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    self.rejoin_timers.pop(guild_id, None)
+                    await recorder.rejoined(session, after.channel)
+            elif pending is None or pending.done():
+                self.rejoin_timers[guild_id] = asyncio.create_task(self._rejoin_watch(guild_id))
             return
 
         # Someone was brought up onto the stage (or is otherwise now a speaker in
@@ -393,6 +414,45 @@ class Notes(commands.Cog):
             self.alone_timers.pop(guild_id, None)
         elif pending is None or pending.done():
             self.alone_timers[guild_id] = asyncio.create_task(self._alone_check(guild_id))
+
+    async def _rejoin_watch(self, guild_id: int) -> None:
+        """
+        The bot left the channel mid-recording. Give nextcord's reconnect a
+        chance; if it doesn't come back, salvage what was recorded.
+        """
+        deadline = time.monotonic() + RECONNECT_GRACE_SECONDS
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(RECONNECT_POLL_SECONDS)
+                session = self.sessions.get(guild_id)
+                if session is None:
+                    return
+                guild = self.bot.get_guild(guild_id)
+                me_voice = getattr(getattr(guild, "me", None), "voice", None)
+                back = (
+                    me_voice is not None
+                    and me_voice.channel is not None
+                    and me_voice.channel.id == session.channel_id
+                    and session.voice_client.is_connected()
+                )
+                if back:
+                    return  # the rejoin event normally beats us here; belt and braces
+                # nextcord gave up (or handled a real kick) and dropped the client —
+                # no rejoin is coming, no point waiting out the rest of the grace.
+                if guild is not None and guild.voice_client is None:
+                    break
+        except asyncio.CancelledError:
+            return
+
+        self.rejoin_timers.pop(guild_id, None)
+        channel = self._notify_channel_for(guild_id)
+        if channel is None:
+            return
+        await channel.send(
+            "I got yanked out of the voice channel mid-meeting and couldn't get "
+            "back in. Salvaging what I recorded."
+        )
+        await self._finish(guild_id, channel)
 
     async def _alone_check(self, guild_id: int) -> None:
         """After the grace period, if still alone, wrap the meeting up."""
@@ -471,7 +531,7 @@ class Notes(commands.Cog):
         # current task would raise CancelledError partway through the wrap-up,
         # losing the meeting we just recorded.
         current = asyncio.current_task()
-        for registry in (self.timers, self.alone_timers, self.liveness_timers):
+        for registry in (self.timers, self.alone_timers, self.liveness_timers, self.rejoin_timers):
             task = registry.pop(guild_id, None)
             if task is not None and task is not current and not task.done():
                 task.cancel()

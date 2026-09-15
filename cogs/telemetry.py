@@ -19,6 +19,13 @@ EASTERN = ZoneInfo("America/New_York")
 OFFICE_HOUR_BUFFER_MINUTES = 30
 TAIGA_CHECK_HOUR   = 19
 TAIGA_CHECK_MINUTE = 0
+# Second pass, after the sprint has actually ended: Monday 00:00. The Sunday
+# evening check is what people see coming, but tasks closed late Sunday night
+# — after the check, before the sprint rolls over — would otherwise be counted
+# as never done. This re-scores the sprint that just finished.
+TAIGA_RECHECK_DAY    = "Monday"
+TAIGA_RECHECK_HOUR   = 0
+TAIGA_RECHECK_MINUTE = 0
 SVN_CHECK_MINUTES  = 5
 
 def load_telemetry():
@@ -174,6 +181,10 @@ class Telemetry(commands.Cog):
         # One-shot latch so check_svn_commits reports having nothing to poll
         # once, rather than every SVN_CHECK_MINUTES.
         self._warned_no_repos = False
+        # Date each scheduled Taiga check last ran, so a check whose exact
+        # minute got skipped (the loop stalls behind a transcription, say)
+        # still fires later that day instead of being lost for the week.
+        self._taiga_check_ran: dict[str, str] = {}
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -526,32 +537,92 @@ class Telemetry(commands.Cog):
 
     # ── Taiga completion check ──────────────────────────────────────────────────
 
+    def _check_due(self, now, key: str, day: str, hour: int, minute: int) -> bool:
+        """
+        True once per `day` of the week, the first loop tick at or after
+        hour:minute. Remembering the date it fired (rather than matching the
+        exact minute) means a tick that arrives late still runs the check.
+        """
+        if now.strftime("%A") != day:
+            return False
+        if (now.hour, now.minute) < (hour, minute):
+            return False
+        today = now.strftime("%Y-%m-%d")
+        if self._taiga_check_ran.get(key) == today:
+            return False
+        self._taiga_check_ran[key] = today
+        return True
+
+    async def _get_milestones(self, project_id, open_only: bool):
+        import aiohttp
+        url = f"{TAIGA_URL}/api/v1/milestones?project={project_id}"
+        if open_only:
+            url += "&closed=false"
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(
+                url, headers={"Authorization": f"Bearer {self.taiga_token}"}
+            )
+            milestones = await resp.json()
+        return milestones if isinstance(milestones, list) else []
+
+    async def get_ended_sprint(self, today):
+        """
+        The milestone that most recently finished before `today`, as
+        (name, id, project_id) — or (None, None, None).
+
+        Deliberately not get_current_sprint(): by Monday 00:00 "current" may
+        already be the new sprint, and the straggler pass has to re-score the
+        one that just closed. Looks at closed milestones too, since someone
+        may have closed the sprint in Taiga on Sunday night. Ignores anything
+        that finished more than a week ago — that isn't "just ended", and the
+        Sunday check already covered it.
+        """
+        _, project_id = await self.get_current_sprint()
+        if not project_id:
+            return None, None, None
+        today_s = today.isoformat()
+        cutoff  = (today - timedelta(days=7)).isoformat()
+        ended = [
+            m for m in await self._get_milestones(project_id, open_only=False)
+            if (finish := m.get("estimated_finish")) and cutoff <= finish < today_s
+        ]
+        if not ended:
+            return None, None, project_id
+        latest = max(ended, key=lambda m: m["estimated_finish"])
+        return latest.get("name"), latest.get("id"), project_id
+
     @ext_tasks.loop(minutes=1)
     async def taiga_completion_check(self):
         now = datetime.now(EASTERN)
-        if now.strftime("%A") != "Sunday":
-            return
-        if now.hour != TAIGA_CHECK_HOUR or now.minute != TAIGA_CHECK_MINUTE:
-            return
 
-        print("[Telemetry] Running Sunday Taiga completion check...")
-
-        sprint_name, project_id = await self.get_current_sprint()
-        if not sprint_name or not project_id:
-            print("[Telemetry] Could not get current sprint for completion check.")
-            return
-
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            resp = await session.get(
-                f"{TAIGA_URL}/api/v1/milestones?project={project_id}&closed=false",
-                headers={"Authorization": f"Bearer {self.taiga_token}"}
-            )
-            milestones = await resp.json()
+        if self._check_due(now, "sunday", "Sunday", TAIGA_CHECK_HOUR, TAIGA_CHECK_MINUTE):
+            print("[Telemetry] Running Sunday Taiga completion check...")
+            sprint_name, project_id = await self.get_current_sprint()
+            if not sprint_name or not project_id:
+                print("[Telemetry] Could not get current sprint for completion check.")
+                return
+            milestones = await self._get_milestones(project_id, open_only=True)
             if not milestones:
                 return
             sprint_id = pick_current_milestone(milestones).get("id")
+            await self._score_sprint_completion(sprint_name, sprint_id, project_id)
 
+        elif self._check_due(now, "monday", TAIGA_RECHECK_DAY,
+                             TAIGA_RECHECK_HOUR, TAIGA_RECHECK_MINUTE):
+            print("[Telemetry] Running Monday straggler check on the sprint that just ended...")
+            sprint_name, sprint_id, project_id = await self.get_ended_sprint(now.date())
+            if not sprint_name or not sprint_id:
+                print("[Telemetry] No sprint finished in the last week — nothing to re-score.")
+                return
+            await self._score_sprint_completion(sprint_name, sprint_id, project_id)
+
+    async def _score_sprint_completion(self, sprint_name, sprint_id, project_id):
+        """
+        Set taiga_complete for every member in `sprint_name`'s telemetry record
+        from the live state of that milestone's tasks. Re-runnable: each run
+        replaces the previous verdict, so the Monday pass simply overwrites
+        Sunday's for anyone who finished late.
+        """
         sprint_tasks = await self.get_sprint_tasks(project_id, sprint_id)
 
         try:
@@ -576,9 +647,11 @@ class Telemetry(commands.Cog):
                 incomplete_by_user[discord_id] = incomplete_by_user.get(discord_id, 0) + 1
 
         data   = load_telemetry()
-        sprint = data.get("current_sprint")
-        if not sprint:
-            return
+        sprint = sprint_name
+        # The Monday pass can arrive after check_sprint has rolled
+        # current_sprint forward; the record it needs is the ended sprint's,
+        # which is always there by name because it was current for two weeks.
+        data["sprints"].setdefault(sprint, {})
 
         for m in sheet_data:
             discord_id = m.get("discord_id")
@@ -599,7 +672,7 @@ class Telemetry(commands.Cog):
             print(f"[Telemetry] {m['name']} — taiga_complete: {incomplete == 0} ({incomplete} incomplete tasks)")
 
         save_telemetry(data)
-        print("[Telemetry] Taiga completion check done.")
+        print(f"[Telemetry] Taiga completion check done for '{sprint}'.")
 
     @taiga_completion_check.before_loop
     async def before_taiga_check(self):

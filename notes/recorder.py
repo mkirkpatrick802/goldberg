@@ -221,6 +221,10 @@ class RecordingSession:
     # cog tell "heard nothing" (silence) apart from "heard plenty but couldn't
     # decrypt a single one" (the stage / DAVE-group failure).
     received_packets: int = 0
+    # Transport key of the voice session the decryptors were built for. nextcord
+    # silently reconnects after a network blip (new socket, new secret key, new
+    # DAVE group); when the key changes the old decryptors are stale.
+    session_key: bytes | None = None
 
 
 def _capture_loop(session: RecordingSession) -> None:
@@ -230,12 +234,20 @@ def _capture_loop(session: RecordingSession) -> None:
     No crypto here — libdave is not thread-safe, so decryption happens on the
     event loop.
     """
-    sock = session.voice_client.socket
     while not session.stop_flag.is_set():
+        # Re-read every pass: nextcord opens a fresh UDP socket on every
+        # (re)connect, so holding on to the first one means recording nothing
+        # after a network blip — the old socket just goes quiet.
+        sock = session.voice_client.socket
+        if not sock:
+            time.sleep(0.5)
+            continue
         try:
             ready, _, _ = select.select([sock], [], [], 0.5)
         except Exception:
-            break
+            # Closed under us (mid-reconnect). The next pass picks up the new one.
+            time.sleep(0.5)
+            continue
         if not ready:
             continue
         try:
@@ -251,6 +263,16 @@ def _decrypt_packet(session: RecordingSession, arrival: float, data: bytes):
     voice = session.voice_client
     if not voice.secret_key:
         return None
+    key = bytes(voice.secret_key)
+    if key != session.session_key:
+        # New voice session (first packet, or nextcord reconnected). Every
+        # cached Decryptor belongs to the old DAVE group; drop them so the next
+        # frame per speaker fetches a ratchet from the new one.
+        if session.session_key is not None:
+            _log("Voice session changed (reconnect) — resetting DAVE decryptors.")
+            session.decryptors.clear()
+            session.frames_seen.clear()
+        session.session_key = key
 
     ssrc, aad_len, ext_body, has_padding = _parse_rtp(data)
     try:
@@ -340,6 +362,19 @@ def _mls_session(voice):
     """The libdave MLS session behind a voice client, or None if there isn't one."""
     e2ee = getattr(voice, "e2ee_state", None)
     return getattr(e2ee, "_session", None) if e2ee else None
+
+
+async def rejoined(session: RecordingSession, voice_channel) -> None:
+    """
+    nextcord got the bot back into the channel after a dropped connection.
+
+    Audio during the gap is simply lost (the arrival-time padding keeps the
+    tracks aligned); the capture thread and decryptors follow the new session
+    on their own. The one thing that doesn't come back by itself is speaker
+    status on a stage — the bot rejoins as audience, outside the DAVE group.
+    """
+    _log("Voice reconnected — recording continues.")
+    await _take_stage(voice_channel, voice_channel.guild)
 
 
 async def _take_stage(voice_channel, guild) -> None:
@@ -468,6 +503,13 @@ async def stop(session: RecordingSession) -> dict[str, Path]:
     # Anything still queued.
     _drain(session, budget=100000)
 
+    # Kill nextcord's reconnect loop BEFORE leaving. If a reconnect is in
+    # flight (backoff sleep or handshake) it isn't watching the websocket, so
+    # closing it doesn't stop it — it finishes the handshake and re-joins the
+    # channel as a zombie with no recording behind it.
+    runner = getattr(session.voice_client, "_runner", None)
+    if runner is not None and not runner.done():
+        runner.cancel()
     try:
         await session.voice_client.disconnect(force=True)
     except Exception as e:
