@@ -4,7 +4,7 @@ from datetime import datetime
 import random
 
 from config import OFFICE_HOUR_CHANNEL, SERVER_ID, TIMEZONE, WORKSHEET_NAME
-from utils import get_sheet_members, is_dev
+from utils import get_sheet_members, is_dev, office_hour_hosts
 
 # ─── Goldberg's Vocabulary ─────────────────────────────────────────────────────
 
@@ -42,18 +42,25 @@ SCHEDULE_FETCH_ERROR = [
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
 def get_schedule() -> list[dict]:
-    """Fetch and parse the office hours schedule."""
-    members = get_sheet_members()
+    """
+    Fetch and parse the office hours schedule.
+
+    Only members whose role carries the office-hours expectation are on it
+    (utils.office_hour_hosts) — a Jump-In with a day/time on file isn't an
+    official slot, so it isn't announced or listed.
+    """
+    members = office_hour_hosts(get_sheet_members())
     schedule = []
     for member in members:
         if not member.get("day") or not member.get("start_time"):
             continue
         schedule.append({
-            "name":       member["name"],
-            "discord_id": member["discord_id"],
-            "day":        member["day"],
-            "start_time": member["start_time"],
-            "active":     member["active"],
+            "name":          member["name"],
+            "discord_id":    member["discord_id"],
+            "team_position": member.get("team_position", ""),
+            "day":           member["day"],
+            "start_time":    member["start_time"],
+            "active":        member["active"],
         })
     return schedule
 

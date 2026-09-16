@@ -100,7 +100,8 @@ def build_info_embeds() -> list[nextcord.Embed]:
     )
     automatic.add_field(
         name="Office hours pings",
-        value="I announce the moment someone's slot starts and tag them, so you have no excuse.",
+        value="I announce the moment someone's slot starts and tag them, so you have no excuse. "
+              "Only positions that are expected to hold office hours get one — Jump-Ins are off the hook.",
         inline=False,
     )
     automatic.add_field(

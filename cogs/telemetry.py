@@ -10,7 +10,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 from config import SERVER_ID, TAIGA_URL, TAIGA_PROJECT_SLUG
-from utils import get_sheet_members, pick_current_milestone, get_watched_projects
+from utils import get_sheet_members, pick_current_milestone, get_watched_projects, office_hour_hosts
 
 TELEMETRY_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "telemetry.json"))
 SETUP_FILE     = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json"))
@@ -364,10 +364,14 @@ class Telemetry(commands.Cog):
         Record office-hour attendance for a real channel join. Both counters
         dedup per office-hour occurrence (see _office_hour_session), so a host
         who rejoins or an attendee who comes and goes is only ever counted once.
+
+        Only members whose role is expected to hold office hours count as
+        hosts (utils.office_hour_hosts) — the same filter the announcer uses,
+        so nobody is scored for a slot Goldberg never announced.
         """
         user_id = str(member.id)
         try:
-            sheet_data = get_sheet_members()
+            sheet_data = office_hour_hosts(get_sheet_members())
         except Exception as e:
             print(f"[Telemetry] Failed to load sheet: {e}")
             return

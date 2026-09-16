@@ -72,11 +72,12 @@ except Exception:
     config.SERVER_ID = 1
     config.TAIGA_URL = config.TAIGA_PROJECT_SLUG = config.REPO_LINK = ""
 
-try:  # utils.get_sheet_members (patched per-test anyway)
+try:  # utils.get_sheet_members / office_hour_hosts (patched per-test anyway)
     import utils  # noqa: F401
 except Exception:
     utils = _stub("utils")
     utils.get_sheet_members = lambda: []
+    utils.office_hour_hosts = lambda members: members
 
 
 import cogs.telemetry as tel
@@ -139,11 +140,17 @@ class Harness:
             "load_telemetry":   tel.load_telemetry,
             "save_telemetry":   tel.save_telemetry,
             "get_sheet_members": tel.get_sheet_members,
+            "office_hour_hosts": tel.office_hour_hosts,
             "load_setup_config": tel.load_setup_config,
         }
         tel.load_telemetry    = lambda: self.store
         tel.save_telemetry    = lambda data: self.store.update(data)
         tel.get_sheet_members = lambda: self.roster
+        # Same rule the real filter applies, minus the database: Jump-In has no
+        # official office hours; everyone else (including no position) does.
+        tel.office_hour_hosts = lambda members: [
+            m for m in members if m.get("team_position") != "Jump-In"
+        ]
         tel.load_setup_config = lambda: {"dev_zone_category_id": CATEGORY_ID}
 
     def restore(self):
@@ -303,6 +310,30 @@ def test_mute_event_ignored():
         h.restore()
 
 
+def test_exempt_role_is_not_a_host():
+    print("\n▶ A Jump-In with a slot on file is neither a host nor gets attendees")
+    now = datetime.now(EASTERN)
+    roster = make_roster(now)
+    roster[0]["team_position"] = "Jump-In"   # Alice's slot is live, but unofficial
+    channel = FakeChannel(1)
+    alice = FakeMember("100", "Alice", voice_channel=channel)
+    bob   = FakeMember("200", "Bob")
+    guild = FakeGuild([alice, bob])
+    h = Harness(roster, guild)
+    try:
+        cog = tel.Telemetry(FakeBot(guild))
+        cog._track_office_hours(alice, channel, now)
+        check("jump-in host not counted", h.attended("100"), 0)
+        cog._track_office_hours(bob, channel, now)
+        check("no attendee credit for jump-in", h.attendees("100"), 0)
+        # Promote her and the same join counts — the switch is the role alone.
+        roster[0]["team_position"] = "Core"
+        cog._track_office_hours(alice, channel, now)
+        check("core host counted", h.attended("100"), 1)
+    finally:
+        h.restore()
+
+
 def test_sprint_change_prunes_sessions():
     print("\n▶ A new sprint wipes the office-hours dedup scratchpad")
     now = datetime.now(EASTERN)
@@ -339,6 +370,7 @@ def main():
     test_attendee_host_absent()
     test_outside_window()
     test_mute_event_ignored()
+    test_exempt_role_is_not_a_host()
     test_sprint_change_prunes_sessions()
     print("\n" + "=" * 50)
     if _failures:

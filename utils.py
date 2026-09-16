@@ -105,13 +105,16 @@ def _members_from_sheet() -> list[dict]:
             continue
         username = entry.get("Username", "").strip()
         members.append({
-            "name":       entry.get("Name", "").strip(),
-            "username":   username,
-            "discord_id": entry.get("Discord ID", "").strip(),
-            "taiga_name": username,
-            "day":        entry.get("Day of the Week", "").strip(),
-            "start_time": entry.get("Start Time", "").strip(),
-            "active":     entry.get("Active", "").strip(),
+            "name":          entry.get("Name", "").strip(),
+            "username":      username,
+            "discord_id":    entry.get("Discord ID", "").strip(),
+            "taiga_name":    username,
+            # The legacy sheet predates team positions; a "Position" column is
+            # honoured if someone adds one, otherwise blank (= full member).
+            "team_position": entry.get("Position", "").strip(),
+            "day":           entry.get("Day of the Week", "").strip(),
+            "start_time":    entry.get("Start Time", "").strip(),
+            "active":        entry.get("Active", "").strip(),
         })
     return members
 
@@ -186,8 +189,8 @@ def get_sheet_members() -> list[dict]:
     a database that exists but hasn't been populated on this host would
     otherwise silently empty the office hours schedule.
 
-    Returned dicts: name, username, discord_id, taiga_name, day, start_time,
-    active.
+    Returned dicts: name, username, discord_id, taiga_name, team_position, day,
+    start_time, active.
     """
     from config import MEMBER_SOURCE
 
@@ -210,6 +213,68 @@ def get_sheet_members() -> list[dict]:
     members = _members_from_sheet()
     print(f"[Members] Loaded {len(members)} members from the sheet.")
     return members
+
+
+# ── Role expectations ────────────────────────────────────────────────────────
+# Which obligations apply to which team position, as set on the webapp's admin
+# page (shared/database.py: role_expectations). The first — and so far only —
+# switch is office hours: Jump-In members have no official slot, so they are
+# neither announced nor scored for one. Owner/Lead/Core/Support are.
+
+def get_role_expectations() -> dict:
+    """
+    {team_position: {expectation: bool}} from the shared database, or {} when
+    it isn't reachable. An empty policy means "everyone is expected to do
+    everything", which is exactly how the bot behaved before roles existed —
+    so a checkout without the shared folder keeps working unchanged.
+    """
+    if _SHARED_DIR not in sys.path:
+        sys.path.insert(0, _SHARED_DIR)
+    try:
+        import database
+        return database.get_role_expectations()
+    except Exception as e:
+        print(f"[Members] Role expectations unavailable ({type(e).__name__}: {e}) "
+              f"- treating every position as fully expected.")
+        return {}
+
+
+def is_expected(member: dict, expectation: str, expectations: dict | None = None) -> bool:
+    """
+    Does `expectation` apply to this member, given their team_position?
+
+    Mirrors database.is_expected: a blank or unknown position — or a member
+    dict from a source that has no positions at all — answers True, so nobody
+    gets waived by accident.
+    """
+    if expectations is None:
+        expectations = get_role_expectations()
+    flags = expectations.get((member.get("team_position") or "").strip())
+    if not flags:
+        return True
+    return bool(flags.get(expectation, True))
+
+
+def office_hour_hosts(members: list[dict]) -> list[dict]:
+    """
+    The subset of `members` whose role carries an office-hours expectation.
+
+    This is the one filter both the announcer (cogs/office_hours.py) and the
+    attendance counter (cogs/telemetry.py) apply, so a member is either an
+    official host for both purposes or for neither. Someone in an exempt role
+    who still has a day/time on file is simply not treated as official — the
+    slot stays on their account in case their position changes.
+    """
+    expectations = get_role_expectations()
+    hosts, skipped = [], []
+    for m in members:
+        if is_expected(m, "office_hours", expectations):
+            hosts.append(m)
+        elif m.get("day") and m.get("start_time"):
+            skipped.append(f"{m.get('name')} ({m.get('team_position')})")
+    if skipped:
+        print(f"[Members] Not official office-hour hosts by role: {', '.join(skipped)}")
+    return hosts
 
 
 def chunk_message(message: str, limit: int = 1900) -> list[str]:
