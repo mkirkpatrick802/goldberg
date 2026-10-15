@@ -2,9 +2,9 @@
 from nextcord.ext import commands
 import json
 import os
-import random
-
+import lines
 from config import SERVER_ID
+from lines import get_line
 
 DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 
@@ -23,26 +23,13 @@ def save_config(data):
 
 INFO_COLOR = 0xc8521a
 
-INFO_INTROS = [
-    "Fine. You want the full rundown? Sit down — this might take a while. Unlike some of you, I actually do a lot.",
-    "Since nobody reads pinned messages, here's the complete list. Try to keep up.",
-    "Someone with admin powers decided you needed this spelled out. Here's everything I do, in excessive detail.",
-]
-
-INFO_OUTROS = [
-    "That's the whole act. Try not to need me for all of it at once.",
-    "Now you have no excuse for pinging me with questions this answers.",
-    "Save this. I'm not typing it again.",
-    "Read it twice. I'll wait. (I won't.)",
-]
-
 
 def build_info_embeds() -> list[nextcord.Embed]:
     """Goldberg's own feature rundown, posted by /setup info_channel."""
     overview = nextcord.Embed(
         title="🤖 Everything I Do (Whether You Asked Or Not)",
         description=(
-            f"{random.choice(INFO_INTROS)}\n\n"
+            f"{get_line('info.intro')}\n\n"
             "I'm Goldberg — The Maple Barrel's Discord bot. I run commit "
             "notifications, sprint reminders, office hours, meeting notes, and "
             "a personality nobody requested but everybody tolerates. Here's the "
@@ -121,7 +108,7 @@ def build_info_embeds() -> list[nextcord.Embed]:
               "background. No public report exists yet — consider it evidence I'm keeping.",
         inline=False,
     )
-    automatic.set_footer(text=random.choice(INFO_OUTROS))
+    automatic.set_footer(text=get_line("info.outro"))
 
     return [overview, everyone, devs, testers, automatic]
 
@@ -339,6 +326,16 @@ class Setup(commands.Cog):
         # read it without asking, so it goes to the channel, not the admin only.
         for embed in build_info_embeds():
             await interaction.channel.send(embed=embed)
+
+    @setup_group.subcommand(name="reload_lines", description="Re-read Goldberg's lines from the spreadsheet now.")
+    async def reload_lines(self, interaction: nextcord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        count, source = lines.reload_lines()
+        await interaction.followup.send(f"✅ Loaded {count} lines from {source}.", ephemeral=True)
 
 def setup(bot):
     bot.add_cog(Setup(bot))

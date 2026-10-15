@@ -18,6 +18,22 @@ of attitude.
   named. `/shutup` mutes them during serious conversations; `/wakeup` brings him
   back. (He no longer adds emoji *reactions* — those created false reply pings.)
 
+## Goldberg's Lines
+
+Goldberg's quips live in a spreadsheet, not in the code. The team edits the
+**Lines** tab of the team Google Sheet (the one `DATA_SHEET_KEY` points at).
+Goldberg re-reads it every 5 minutes. Admins can run `/setup reload_lines` to
+pick up changes right away. In each category he works through every active line,
+in shuffled order, before he repeats one.
+
+To set it up, import [goldberg_lines.xlsx](goldberg_lines.xlsx) into the team
+Google Sheet (File → Import → *Insert new sheet(s)*). That adds the **Lines**
+and **Categories** tabs. The **How To** tab explains how to add lines and which
+placeholders (`{mention}`, `{sprint}`, `{duration}`) each category supports. If
+the Google Sheet can't be reached, Goldberg falls back to the bundled
+`goldberg_lines.xlsx`, which needs `openpyxl` installed. Never put secrets in
+the sheet. The `/repo` admin passphrase stays in the code.
+
 ## Documentation
 
 - **[Overview](documentation/Overview.md)** — what Goldberg offers.

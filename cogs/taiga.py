@@ -3,11 +3,11 @@ from nextcord.ext import commands, tasks
 import aiohttp
 import json
 import os
-import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config import TAIGA_URL, TAIGA_USERNAME, TAIGA_PASSWORD, TAIGA_PROJECT_SLUG, SERVER_ID
+from lines import get_line
 from utils import get_sheet_members, chunk_message, is_dev, pick_current_milestone
 
 REMINDER_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "reminder_data.json")
@@ -18,35 +18,6 @@ EASTERN = ZoneInfo("America/New_York")
 REMINDER_DAYS = {"Tuesday", "Friday", "Sunday"}
 REMINDER_HOUR = 10
 REMINDER_MINUTE = 0
-
-# Goldberg's DM voice — sarcastic, game-dev-flavored, allergic to sounding like a
-# bot. Two tones: a gentler "nudge" for the first half of the sprint and an
-# urgent "final" once we're past the midpoint. The exact day/deadline lives in
-# the progress banner, so the intros stay timing-agnostic.
-HALFWAY_INTROS = [
-    "Reminder: these are *still* sitting on your plate for **{sprint}**. I'm not mad. I'm just documenting it for retro.",
-    "Checking in on **{sprint}**. Here's what you still owe me:",
-    "Perfect time to pretend you were *just about* to start these **{sprint}** tasks:",
-    "The board says you've got unfinished business in **{sprint}**. The board doesn't lie. I do. But not about this:",
-    "These **{sprint}** tasks haven't moved. Curious. Let's fix that:",
-]
-
-FINAL_INTROS = [
-    "Last call. **{sprint}** ends this week and these are still open. No pressure. (Immense pressure.)",
-    "**{sprint}** wraps up in days, not decades. These haven't moved. Neither have you, apparently:",
-    "The **{sprint}** deadline is breathing down your neck and your tasks are staging a sit-in:",
-    "Final warning before **{sprint}** closes: ship these or explain yourself at retro. Your call:",
-    "It's crunch o'clock for **{sprint}**. These are the tasks standing between you and a clean burndown chart:",
-]
-
-REMINDER_SIGNOFFS = [
-    "Don't make me bring this up in the standup channel. 💀",
-    "Get to it before I start taking it personally. 🫡",
-    "I believe in you. Barely. 🤌",
-    "Move it - your future self is already disappointed. 😬",
-    "- Goldberg, doing more of your project management than you are. 💅",
-    "Close these or I'm telling everyone you rage quit game dev. 👀",
-]
 
 def load_reminders():
     if not os.path.exists(REMINDER_FILE):
@@ -254,8 +225,8 @@ class Taiga(commands.Cog):
 
     def build_reminder_dm(self, sprint_name: str, phase: str, bucket: dict,
                           progress: str | None = None) -> str:
-        pool = HALFWAY_INTROS if phase == "halfway" else FINAL_INTROS
-        intro = random.choice(pool).format(sprint=sprint_name)
+        category = "reminder.halfway_intro" if phase == "halfway" else "reminder.final_intro"
+        intro = get_line(category, sprint=sprint_name)
 
         lines = [intro, ""]
         if progress:
@@ -269,7 +240,7 @@ class Taiga(commands.Cog):
             lines.append("🔄 **In Progress** (allegedly)")
             lines.extend(bucket["in_progress"])
         lines.append("")
-        lines.append(random.choice(REMINDER_SIGNOFFS))
+        lines.append(get_line("reminder.signoff"))
         return "\n".join(lines)
 
     async def send_task_reminders(self, phase: str) -> int:
@@ -362,7 +333,7 @@ class Taiga(commands.Cog):
                 grouped[story_id]["in_progress"].append(entry)
 
         if not grouped:
-            return f"📋 **Sprint Update — {sprint_name}**\n\n✅ No new or in progress tasks. Either you're crushing it or nobody's working."
+            return f"📋 **Sprint Update — {sprint_name}**\n\n✅ {get_line('sprint.nothing_open')}"
 
         lines = [f"📋 **Sprint Update — {sprint_name}**\n"]
         for story_id, data in grouped.items():
@@ -425,7 +396,7 @@ class Taiga(commands.Cog):
     async def sprint_board(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️",
+                get_line("devs_only"),
                 ephemeral=True
             )
             return
@@ -469,7 +440,7 @@ class Taiga(commands.Cog):
     async def my_tasks(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️",
+                get_line("devs_only"),
                 ephemeral=True
             )
             return
@@ -491,7 +462,7 @@ class Taiga(commands.Cog):
                 break
 
         if not taiga_name:
-            await interaction.followup.send("⚠️ I don't know who you are in Taiga. Bug your admin.", ephemeral=True)
+            await interaction.followup.send(f"⚠️ {get_line('tasks.unknown_user')}", ephemeral=True)
             return
 
         async with aiohttp.ClientSession() as session:
@@ -523,7 +494,7 @@ class Taiga(commands.Cog):
 
         if not bucket["new"] and not bucket["in_progress"]:
             lines.append(
-                "✅ No new or in progress tasks. Either you're done or you haven't started. Goldberg isn't judging. (He is.)")
+                f"✅ {get_line('tasks.nothing_open')}")
 
         await interaction.followup.send(
             "\n".join(lines),
