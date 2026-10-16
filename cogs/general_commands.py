@@ -1,25 +1,20 @@
-﻿import random
-
-import nextcord
+﻿import nextcord
 from nextcord.ext import commands
 
 from config import BUILDS_LINK, DRIVE_LINK, FIGMA_LINK, SERVER_ID
+from lines import get_line
 from utils import is_dev, get_company_links
 
 # Fallback for a fresh migration where nobody's populated Company Info yet —
 # same links this command always had, kept only so /socials doesn't go blank.
 # Safe to delete once the "Socials" group on the Wiki page has real rows.
+# Each link's tagline comes from the "socials.<key>" lines category.
 _SOCIALS_FALLBACK = [
-    {"label": "🌐 Website",   "url": "https://www.themaplebarrel.com/",
-     "note": "The mothership."},
-    {"label": "📸 Instagram", "url": "https://www.instagram.com/themaplebarrel/",
-     "note": "Pretty pictures. Very professional."},
-    {"label": "▶️ YouTube",   "url": "https://www.youtube.com/@TheMapleBarrel",
-     "note": "Videos. Some of them are even good."},
-    {"label": "🎗️ Patreon",  "url": "https://www.patreon.com/TheMapleBarrel",
-     "note": "Support the chaos. Financially."},
-    {"label": "💼 LinkedIn",  "url": "https://www.linkedin.com/company/the-maple-barrel",
-     "note": "For when we're pretending to be professionals."},
+    {"key": "website",   "label": "🌐 Website",   "url": "https://www.themaplebarrel.com/"},
+    {"key": "instagram", "label": "📸 Instagram", "url": "https://www.instagram.com/themaplebarrel/"},
+    {"key": "youtube",   "label": "▶️ YouTube",   "url": "https://www.youtube.com/@TheMapleBarrel"},
+    {"key": "patreon",   "label": "🎗️ Patreon",  "url": "https://www.patreon.com/TheMapleBarrel"},
+    {"key": "linkedin",  "label": "💼 LinkedIn",  "url": "https://www.linkedin.com/company/the-maple-barrel"},
 ]
 
 
@@ -29,34 +24,17 @@ class GeneralCommands(commands.Cog):
 
     @nextcord.slash_command(name="joke", description="Yes I can joke as well", guild_ids=[SERVER_ID])
     async def joke(self, ctx):
-        jokes = [
-            "Why do programmers prefer dark mode? Because light attracts bugs. Just like you attract problems. 🐛",
-            "Why did the Git commit cross the road? To get merged into master. Unlike YOUR commits, which just sit there. 🙃",
-            "There are 10 kinds of people in this world: those who understand binary and those who don't. You know which one you are. 😆",
-            "A QA engineer walks into a bar. Orders 0 beers. Orders 99999 beers. Orders -1 beers. Orders a lizard. Orders NULL beers. Nobody tested this. 🦎",
-            "Why do Java developers wear glasses? Because they don't C#. You're welcome. 😎",
-            "A SQL query walks into a bar, walks up to two tables and asks... 'Can I join you?' Nobody laughed. Much like your code reviews. 🥲",
-            "'It works on my machine.' Congratulations. Ship your machine. 🚢",
-            "Debugging: the art of being the detective in a crime movie where you're also the murderer. Sound familiar? 🔍",
-        ]
-        await ctx.send(random.choice(jokes))
+        await ctx.send(get_line("joke"))
 
     @nextcord.slash_command(name="hello", description="Say hello if you must", guild_ids=[SERVER_ID])
     async def hello(self, interaction: nextcord.Interaction):
-        responses = [
-            f"Oh. It's {interaction.user.mention}. Joy. Unbridled joy. What do you need? 😐",
-            f"Ah, {interaction.user.mention} has arrived. The server's been so peaceful. Past tense. 🫠",
-            f"Hello, {interaction.user.mention}. I'd say I missed you but I'm incapable of lying. 🙃",
-            f"{interaction.user.mention}. You again. What broke this time? 🔥",
-            f"Oh good, {interaction.user.mention} is here. I was worried I wasn't going to have enough to do today. 💅",
-        ]
-        await interaction.response.send_message(random.choice(responses))
+        await interaction.response.send_message(get_line("hello", mention=interaction.user.mention))
 
     @nextcord.slash_command(name="socials", description="Check out The Maple Barrel's socials.", guild_ids=[SERVER_ID])
     async def socials(self, interaction: nextcord.Interaction):
         embed = nextcord.Embed(
             title="🍁 The Maple Barrel",
-            description="Yes, we exist on the internet. Multiple places, actually. Try not to be weird about it.",
+            description=get_line("socials.description"),
             color=0xc8521a
         )
 
@@ -70,46 +48,46 @@ class GeneralCommands(commands.Cog):
                 embed.add_field(name=l["label"], value=f"[Open]({l['url']})", inline=False)
         else:
             for l in _SOCIALS_FALLBACK:
-                embed.add_field(name=l["label"], value=f"[Open]({l['url']}) — {l['note']}", inline=False)
+                embed.add_field(name=l["label"], value=f"[Open]({l['url']}) — {get_line('socials.' + l['key'])}", inline=False)
 
-        embed.set_footer(text="Follow us or don't. I'm a bot, not a publicist.")
+        embed.set_footer(text=get_line("socials.footer"))
         await interaction.response.send_message(embed=embed)
 
     @nextcord.slash_command(name="documentation", description="Access team documentation.", guild_ids=[SERVER_ID])
     async def documentation(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️",
+                get_line("devs_only"),
                 ephemeral=True
             )
             return
 
         embed = nextcord.Embed(
             title="📚 Documentation",
-            description="Everything you need to do your job. No excuses now. 🧨",
+            description=get_line("documentation.description"),
             color=0x5865f2
         )
         embed.add_field(name="🎨 Figma",
-                        value=f"[Design File]({FIGMA_LINK}) — Look at it before you ask someone.",
+                        value=f"[Design File]({FIGMA_LINK}) — {get_line('documentation.figma')}",
                         inline=False)
         embed.add_field(name="🎮 The Maple Games",
-                        value=f"[Google Drive]({DRIVE_LINK}) — It's all in here. Probably.",
+                        value=f"[Google Drive]({DRIVE_LINK}) — {get_line('documentation.drive')}",
                         inline=False)
-        embed.set_footer(text="Read the docs. I'm not your search engine. 🔍")
+        embed.set_footer(text=get_line("documentation.footer"))
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @nextcord.slash_command(name="help", description="Learn what Goldberg can do.", guild_ids=[SERVER_ID])
     async def help(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️",
+                get_line("devs_only"),
                 ephemeral=True
             )
             return
 
         embed = nextcord.Embed(
             title="🤖 Goldberg — What I Do",
-            description="Fine. I'll hold your hand. Just this once. 🙃",
+            description=get_line("help.description"),
             color=0xc8521a
         )
         embed.add_field(
@@ -162,7 +140,7 @@ class GeneralCommands(commands.Cog):
             value="Ends the silent treatment early. You knew you'd miss me.",
             inline=False
         )
-        embed.set_footer(text="You're welcome. 💅")
+        embed.set_footer(text=get_line("help.footer"))
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @nextcord.slash_command(name="builds", description="Get the link to download the latest game builds.", guild_ids=[SERVER_ID])
@@ -171,7 +149,7 @@ class GeneralCommands(commands.Cog):
         tester_role_id = 1394048323698036786
         user_roles = {role.id for role in interaction.user.roles}
         if dev_role_id not in user_roles and tester_role_id not in user_roles:
-            await interaction.response.send_message("You need the dev or tester role to access builds. 🕶️",
+            await interaction.response.send_message(get_line("builds.no_role"),
                                                     ephemeral=True)
             return
         await interaction.response.send_message(

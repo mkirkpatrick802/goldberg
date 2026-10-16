@@ -2,6 +2,7 @@
 from nextcord.ext import commands
 
 from config import REPO_ADMIN_PASSPHRASE, REPO_LINK, REPO_SIGNUP_LINK, SERVER_ID
+from lines import get_line
 from utils import is_dev
 
 
@@ -13,20 +14,20 @@ class RepoCommands(commands.Cog):
     async def repo(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️",
+                get_line("devs_only"),
                 ephemeral=True
             )
             return
         
         await interaction.response.send_message(
-            f"Alright, time to spoon-feed you into the repo. Here's what you *should* be able to do without me:\n\n"
+            f"{get_line('repo.intro')}\n\n"
             f"Step 1: Click this link and make an account. Yes, a real one. Use your `first.lastname` like a functional adult.\n"
             f"```base\n{REPO_SIGNUP_LINK}\n```\n"
-            f"Pick whatever password you like—I'm not your babysitter.\n"
+            f"{get_line('repo.password')}\n"
             f"Use as the admin passphrase `{REPO_ADMIN_PASSPHRASE}` (because of course we trust you with power).\n\n"
             f"Step 2: Clone the repo. It's one command. Try not to mess it up:\n"
             f"```bash\nsvn checkout {REPO_LINK}\n```\n"
-            f"Congrats, you’re now slightly more useful. Let’s see how long that lasts.",
+            f"{get_line('repo.outro')}",
             ephemeral=True
         )
 

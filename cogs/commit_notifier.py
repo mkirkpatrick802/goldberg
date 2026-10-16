@@ -3,50 +3,16 @@ import json
 import os
 import re
 import subprocess
-import random
 from nextcord import AllowedMentions, DiscordServerError, HTTPException
 from nextcord.ext import tasks, commands
 import dateutil.parser
 import xml.etree.ElementTree as ET
 
 from config import SERVER_ID, SVN_TRUST_SERVER_CERT
+from lines import get_line
 from utils import get_watched_projects
 
 _SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
-
-# List of funny messages for missing commit messages
-funny_messages = [
-    "No commit message provided... 🤦‍♂️ Are you even trying?",
-    "Another mysterious commit with no explanation... 🕵️‍♂️",
-    "Commit message? Nah, who needs those? 🤡",
-    "Silence is golden, except in commit messages. Say something! 🦗",
-    "Ah yes, the legendary 'fix stuff' commit. Classic. 😎",
-    "Code changed, but the mystery remains... 🔍",
-    "When future devs see this, they will be *so* grateful. Not. 🙃",
-    "Commit messages are optional, right? RIGHT?? 😬",
-    "One day, archaeologists will uncover this and wonder what happened. 🏺",
-    "Congratulations! You’ve won the 'Least Informative Commit' award! 🏆",
-    "Commit message? We don't do that here. 🛑",
-    "Left the message field blank—just like your soul. 🕳️",
-    "This commit brought to you by caffeine and poor decisions. ☕🤯",
-    "If this breaks everything, we’ll never know why. 🔥🚒",
-    "Might work. Might not. Who knows? 🤷‍♂️",
-    "Change made. Explanation withheld. 🕶️",
-    "This is why we can't have nice things. 🧨",
-    "Future me, I’m sorry. Present me didn’t care. 😔",
-    "No message, just vibes. ✨",
-    "I could explain this commit... but I won't. 🐸☕",
-    "A commit a day keeps the tech lead away. Maybe. 🧑‍💻🕊️",
-    "This was definitely done on purpose. Totally. 💯",
-    "Blame the last person who touched this. 😈",
-    "Too lazy to write a message, but not too lazy to commit. 🎯",
-    "If this breaks the build, it was already broken. 🧱",
-    "Shhh... it’s a stealth commit. 🥷",
-    "This commit has no description because it’s a surprise! 🎁",
-    "Added magic. Don’t ask how. 🪄",
-    "Like a ninja, this change appeared without warning. 🥷✨",
-    "Message redacted for national security. 🕵️‍♀️🔒"
-]
 
 def _get_commit_channel_id():
     try:
@@ -108,7 +74,7 @@ async def get_latest_commit(repo_link: str):
         commit_message = entry.find("msg").text
 
         if commit_message is None:
-            commit_message = random.choice(funny_messages)
+            commit_message = get_line("commit.no_message")
 
         return {
             "revision": revision,

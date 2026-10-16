@@ -1,5 +1,4 @@
 import asyncio
-import random
 import shutil
 import time
 import traceback
@@ -11,39 +10,10 @@ import nextcord
 from nextcord.ext import commands
 
 from config import NOTES_FORUM_CHANNEL_ID, NOTES_MAX_MINUTES, SERVER_ID
+from lines import get_line
 from notes import pipeline, recorder
 from notes.settings import NOTES_TMP_DIR
 from utils import chunk_message, is_dev
-
-# ─── Goldberg's Vocabulary ─────────────────────────────────────────────────────
-
-START_LINES = [
-    "Fine. I'm listening. Try to say something worth writing down.",
-    "Recording. Everything you say from here on is evidence.",
-    "I'm taking notes now, so this is the part where you pretend to be prepared.",
-    "Tape's rolling. Make it count, or don't — I'm transcribing either way.",
-    "Alright, I'm awake and paying attention. Rare for both of us.",
-]
-
-STOP_LINES = [
-    "Recording's off. Let me go make sense of whatever that was.",
-    "Done listening. Now the hard part: figuring out what you all meant.",
-    "Stopped. Give me a minute to turn that into something readable.",
-    "That's a wrap. Processing — this is me doing the work you didn't want to.",
-]
-
-NO_SESSION = [
-    "I'm not recording anything. You have to start before you can stop. Basic stuff.",
-    "There's no session running. You can't stop what never began — philosophical, I know.",
-    "Nothing to stop. I've been sitting here doing nothing, same as always.",
-]
-
-ABANDONED = [
-    "Everyone left and nobody stopped me. I'm not going to sit here narrating an empty room.",
-    "You all wandered off. I'll take the hint — and the notes.",
-    "Last one out didn't hit `/stopnotes`. Shocking. Wrapping up myself.",
-    "The meeting appears to be over, judging by the complete absence of humans.",
-]
 
 # How long the channel must stay empty before we call it. Long enough to survive
 # a reconnect or someone hopping channels, short enough not to record an empty
@@ -190,7 +160,7 @@ class Notes(commands.Cog):
     ):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️", ephemeral=True
+                get_line("devs_only"), ephemeral=True
             )
             return
 
@@ -280,7 +250,7 @@ class Notes(commands.Cog):
         tag_line = f"\n🏷️ Tagged **{team}**." if team else ""
         await interaction.followup.send(
             f"🔴 **Recording — {title}**{tag_line}\n"
-            f"{random.choice(START_LINES)}\n\n"
+            f"{get_line('notes.start')}\n\n"
             f"*Everyone in {voice_state.channel.mention} is being recorded. "
             f"Notes get posted publicly when someone runs `/stopnotes`. "
             f"I'll stop on my own after {NOTES_MAX_MINUTES} minutes.*"
@@ -304,14 +274,14 @@ class Notes(commands.Cog):
     async def stop_notes(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️", ephemeral=True
+                get_line("devs_only"), ephemeral=True
             )
             return
 
         guild_id = interaction.guild.id
         if guild_id not in self.sessions:
             await interaction.response.send_message(
-                random.choice(NO_SESSION), ephemeral=True
+                get_line("notes.no_session"), ephemeral=True
             )
             return
 
@@ -319,7 +289,7 @@ class Notes(commands.Cog):
         # defer immediately — otherwise the interaction times out in 3 seconds.
         await interaction.response.defer()
         await interaction.followup.send(
-            f"{random.choice(STOP_LINES)}\n⏳ *Transcribing and writing up. "
+            f"{get_line('notes.stop')}\n⏳ *Transcribing and writing up. "
             f"This takes a bit — I'll post the notes when they're ready.*"
         )
 
@@ -472,7 +442,7 @@ class Notes(commands.Cog):
         channel = self._notify_channel_for(guild_id)
         if channel is None:
             return
-        await channel.send(random.choice(ABANDONED))
+        await channel.send(get_line("notes.abandoned"))
         await self._finish(guild_id, channel)
 
     async def _liveness_check(self, guild_id: int) -> None:

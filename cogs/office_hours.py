@@ -1,43 +1,10 @@
 import nextcord
 from nextcord.ext import commands, tasks
 from datetime import datetime
-import random
 
 from config import OFFICE_HOUR_CHANNEL, SERVER_ID, TIMEZONE, WORKSHEET_NAME
+from lines import get_line
 from utils import get_sheet_members, is_dev, office_hour_hosts
-
-# ─── Goldberg's Vocabulary ─────────────────────────────────────────────────────
-
-ANNOUNCEMENT_INTROS = [
-    "Alright, listen up.",
-    "Oh look, it's that time again.",
-    "Everybody stop what you're doing. Or don't. Probably don't.",
-    "Your calendar reminder that you absolutely ignored? That was this.",
-    "Yes, it's happening. No, you can't reschedule.",
-    "Attention, inhabitants of this server.",
-    "Put down whatever you're doing that definitely isn't work.",
-]
-
-ANNOUNCEMENT_OUTROS = [
-    "Try not to ask anything too obvious.",
-    "Questions only. Save the small talk for someone who cares.",
-    "They showed up. The least you can do is have an actual question ready.",
-    "This is your one chance to look like you know what you're doing. Use it wisely.",
-    "Don't waste their time. Or do. I'm a bot, not a cop.",
-]
-
-NO_HOURS_TODAY = [
-    "Nobody's on the clock today. Enjoy your blissful, question-answering-free existence.",
-    "No office hours today. You're on your own. Good luck with that.",
-    "Nope. Nothing. Not a single person has agreed to deal with you today.",
-    "Today is office-hour-free. Figure it out yourself for once.",
-]
-
-SCHEDULE_FETCH_ERROR = [
-    "I tried to pull the schedule and something broke. Shocking, truly.",
-    "The sheet isn't cooperating. Classic.",
-    "Couldn't load the schedule. Someone probably broke something. Not naming names.",
-]
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -88,8 +55,8 @@ def fmt_time(time_str: str) -> str:
 
 
 def build_announcement(entry: dict) -> str:
-    intro = random.choice(ANNOUNCEMENT_INTROS)
-    outro = random.choice(ANNOUNCEMENT_OUTROS)
+    intro = get_line("officehours.intro")
+    outro = get_line("officehours.outro")
     return (
         f"{intro}\n\n"
         f"🕐 **Office Hours are starting NOW.**\n"
@@ -176,7 +143,7 @@ class OfficeHours(commands.Cog):
     async def office_hours_today(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️",
+                get_line("devs_only"),
                 ephemeral=True
             )
             return
@@ -190,7 +157,7 @@ class OfficeHours(commands.Cog):
             schedule = get_schedule()
         except Exception as e:
             print(f"[OfficeHours] ⚠️  Sheet fetch failed: {e}")
-            await interaction.followup.send(random.choice(SCHEDULE_FETCH_ERROR))
+            await interaction.followup.send(get_line('officehours.fetch_error'))
             return
 
         todays = sorted(
@@ -199,10 +166,10 @@ class OfficeHours(commands.Cog):
         )
 
         if not todays:
-            await interaction.followup.send(random.choice(NO_HOURS_TODAY))
+            await interaction.followup.send(get_line("officehours.nobody_today"))
             return
 
-        lines = [f"📅 **Office Hours — {today}**\n*Here's who you get to bother today:*\n"]
+        lines = [f"📅 **Office Hours — {today}**\n*{get_line('officehours.today_subtitle')}*\n"]
         for e in todays:
             lines.append(f"• **{fmt_time(e['start_time'])} EDT** — <@{e['discord_id']}> ({e['name']})")
 
@@ -220,7 +187,7 @@ class OfficeHours(commands.Cog):
     async def full_schedule(self, interaction: nextcord.Interaction):
         if not is_dev(interaction):
             await interaction.response.send_message(
-                "Devs only. If you have to ask why, you're not one. 🕶️",
+                get_line("devs_only"),
                 ephemeral=True
             )
             return
@@ -232,7 +199,7 @@ class OfficeHours(commands.Cog):
             schedule = get_schedule()
         except Exception as e:
             print(f"[OfficeHours] ⚠️  Sheet fetch failed: {e}")
-            await interaction.followup.send(random.choice(SCHEDULE_FETCH_ERROR))
+            await interaction.followup.send(get_line('officehours.fetch_error'))
             return
 
         day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -243,7 +210,7 @@ class OfficeHours(commands.Cog):
 
         lines = [
             "📋 **Weekly Office Hours Schedule**",
-            "*Yes, this exists. No, that's not an excuse for not knowing about it.*\n"
+            f"*{get_line('officehours.schedule_subtitle')}*\n"
         ]
         for day in day_order:
             entries = sorted(by_day[day], key=lambda x: x["start_time"])
