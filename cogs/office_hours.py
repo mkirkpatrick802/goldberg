@@ -189,9 +189,8 @@ class OfficeHours(commands.Cog):
         try:
             schedule = get_schedule()
         except Exception as e:
-            await interaction.followup.send(
-                f"{random.choice(SCHEDULE_FETCH_ERROR)}\n```{e}```"
-            )
+            print(f"[OfficeHours] ⚠️  Sheet fetch failed: {e}")
+            await interaction.followup.send(random.choice(SCHEDULE_FETCH_ERROR))
             return
 
         todays = sorted(
@@ -232,9 +231,8 @@ class OfficeHours(commands.Cog):
         try:
             schedule = get_schedule()
         except Exception as e:
-            await interaction.followup.send(
-                f"{random.choice(SCHEDULE_FETCH_ERROR)}\n```{e}```"
-            )
+            print(f"[OfficeHours] ⚠️  Sheet fetch failed: {e}")
+            await interaction.followup.send(random.choice(SCHEDULE_FETCH_ERROR))
             return
 
         day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]

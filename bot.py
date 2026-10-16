@@ -22,8 +22,10 @@ logging.basicConfig(
 # make that constant noise during a normal call.
 logging.getLogger("dave").setLevel(logging.CRITICAL)
 
-intents = nextcord.Intents.all()
+# Only what the cogs use: members (roles/get_member), message content, voice states (default).
+intents = nextcord.Intents.default()
 intents.members = True
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Load cogs

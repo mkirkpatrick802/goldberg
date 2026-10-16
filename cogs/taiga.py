@@ -435,7 +435,8 @@ class Taiga(commands.Cog):
         try:
             sheet_data = get_sheet_members()
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Failed to load sheet data: {e}")
+            print(f"[Taiga] Failed to load sheet data: {e}")
+            await interaction.followup.send("⚠️ Failed to load sheet data.")
             return
 
         message = await self.build_sprint_message(sheet_data)
@@ -479,7 +480,8 @@ class Taiga(commands.Cog):
         try:
             sheet_data = get_sheet_members()
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Failed to load sheet data: {e}")
+            print(f"[Taiga] Failed to load sheet data: {e}")
+            await interaction.followup.send("⚠️ Failed to load sheet data.")
             return
 
         # Find the user's Taiga name from the sheet

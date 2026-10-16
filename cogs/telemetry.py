@@ -9,7 +9,7 @@ import os
 import subprocess
 import xml.etree.ElementTree as ET
 
-from config import SERVER_ID, TAIGA_URL, TAIGA_PROJECT_SLUG
+from config import SERVER_ID, SVN_TRUST_SERVER_CERT, TAIGA_URL, TAIGA_PROJECT_SLUG
 from utils import get_sheet_members, pick_current_milestone, get_watched_projects, office_hour_hosts
 
 TELEMETRY_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "telemetry.json"))
@@ -110,10 +110,9 @@ def _session_record(data, session_key):
 # the single newest commit, which is fine for announcing but would undercount
 # here whenever two commits land inside one poll window.
 
-_SVN_BASE_FLAGS = [
-    "--non-interactive",
-    "--trust-server-cert",
-]
+_SVN_BASE_FLAGS = ["--non-interactive"]
+if SVN_TRUST_SERVER_CERT:
+    _SVN_BASE_FLAGS.append("--trust-server-cert")
 
 # The two calls below need different patience, so http-timeout is per-call
 # rather than shared.

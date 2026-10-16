@@ -260,7 +260,7 @@ class Notes(commands.Cog):
             print(f"[Notes] /takenotes failed to start recording: {e!r}")
             traceback.print_exc()
             await interaction.followup.send(
-                f"Couldn't start recording. Something's broken.\n```{e}```"
+                "Couldn't start recording. Something's broken."
             )
             return
 

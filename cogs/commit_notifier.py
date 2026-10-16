@@ -4,12 +4,12 @@ import os
 import re
 import subprocess
 import random
-from nextcord import DiscordServerError, HTTPException
+from nextcord import AllowedMentions, DiscordServerError, HTTPException
 from nextcord.ext import tasks, commands
 import dateutil.parser
 import xml.etree.ElementTree as ET
 
-from config import SERVER_ID
+from config import SERVER_ID, SVN_TRUST_SERVER_CERT
 from utils import get_watched_projects
 
 _SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
@@ -68,9 +68,10 @@ async def get_latest_commit(repo_link: str):
     "--xml", "--incremental",
     "--non-interactive",
     "--config-option", "servers:global:http-timeout=30",
-    "--trust-server-cert",
-    repo_link,
     ]
+    if SVN_TRUST_SERVER_CERT:
+        cmd.append("--trust-server-cert")
+    cmd.append(repo_link)
 
 
     def run():
@@ -190,8 +191,10 @@ class SvnCommits(commands.Cog):
 
                 if "error" in commit_info:
                     any_error = True
+                    # Raw SVN errors can include repo URLs and server details; keep them in the log.
+                    print(f"[Check SVN Commits] {proj['name']}: {commit_info['error']}")
                     if not self.svn_down:
-                        await channel.send(f"**{proj['name']}:** {commit_info['error']}")
+                        await channel.send(f"⚠️ **{proj['name']}:** Couldn't reach the SVN repo. Will retry.")
                     continue
 
                 revision = commit_info["revision"]
@@ -219,7 +222,8 @@ class SvnCommits(commands.Cog):
                     f"🔸 **Date:** {commit_info['date']}\n"
                     f"🔸 **Message:** {commit_info['message']}"
                 )
-                await channel.send(message)
+                # Commit messages are user-written; don't let them ping @everyone or roles.
+                await channel.send(message, allowed_mentions=AllowedMentions.none())
 
             # SVN answered for at least one repo. Only announce recovery /
             # keep backing off if every repo in the list is currently failing.

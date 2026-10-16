@@ -3,7 +3,7 @@
 import nextcord
 from nextcord.ext import commands
 
-from config import SERVER_ID
+from config import BUILDS_LINK, DRIVE_LINK, FIGMA_LINK, SERVER_ID
 from utils import is_dev, get_company_links
 
 # Fallback for a fresh migration where nobody's populated Company Info yet —
@@ -90,10 +90,10 @@ class GeneralCommands(commands.Cog):
             color=0x5865f2
         )
         embed.add_field(name="🎨 Figma",
-                        value="[Design File](https://www.figma.com/design/qri4WHzrleIpXUwH2PudMy/The-Maple-Barrel?node-id=0-1&t=00wUItIiNs4dOEhA-1) — Look at it before you ask someone.",
+                        value=f"[Design File]({FIGMA_LINK}) — Look at it before you ask someone.",
                         inline=False)
         embed.add_field(name="🎮 The Maple Games",
-                        value="[Google Drive](https://drive.google.com/drive/folders/1Yj__wkWW5ztBsbtQvGtQVI8k5Pbncehx?usp=sharing) — It's all in here. Probably.",
+                        value=f"[Google Drive]({DRIVE_LINK}) — It's all in here. Probably.",
                         inline=False)
         embed.set_footer(text="Read the docs. I'm not your search engine. 🔍")
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -175,7 +175,7 @@ class GeneralCommands(commands.Cog):
                                                     ephemeral=True)
             return
         await interaction.response.send_message(
-            "📦 **Game Builds**\nLatest playable builds, every project:\nhttps://themapleserver.themaplebarrel.com/builds",
+            f"📦 **Game Builds**\nLatest playable builds, every project:\n{BUILDS_LINK}",
             ephemeral=True
         )
 

@@ -71,6 +71,7 @@ except Exception:
     config = _stub("config")
     config.SERVER_ID = 1
     config.TAIGA_URL = config.TAIGA_PROJECT_SLUG = config.REPO_LINK = ""
+    config.SVN_TRUST_SERVER_CERT = False
 
 try:  # utils.get_sheet_members / office_hour_hosts (patched per-test anyway)
     import utils  # noqa: F401

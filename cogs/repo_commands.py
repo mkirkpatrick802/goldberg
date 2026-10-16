@@ -1,7 +1,7 @@
 ﻿import nextcord
 from nextcord.ext import commands
 
-from config import REPO_LINK, REPO_SIGNUP_LINK, SERVER_ID
+from config import REPO_ADMIN_PASSPHRASE, REPO_LINK, REPO_SIGNUP_LINK, SERVER_ID
 from utils import is_dev
 
 
@@ -23,7 +23,7 @@ class RepoCommands(commands.Cog):
             f"Step 1: Click this link and make an account. Yes, a real one. Use your `first.lastname` like a functional adult.\n"
             f"```base\n{REPO_SIGNUP_LINK}\n```\n"
             f"Pick whatever password you like—I'm not your babysitter.\n"
-            f"Use as the admin passphrase `MapleCanoePunch42!` (because of course we trust you with power).\n\n"
+            f"Use as the admin passphrase `{REPO_ADMIN_PASSPHRASE}` (because of course we trust you with power).\n\n"
             f"Step 2: Clone the repo. It's one command. Try not to mess it up:\n"
             f"```bash\nsvn checkout {REPO_LINK}\n```\n"
             f"Congrats, you’re now slightly more useful. Let’s see how long that lasts.",

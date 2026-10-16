@@ -22,6 +22,14 @@ SERVER_ID               = int(_require("SERVER_ID"))
 # until someone creates the first project on the webapp's Wiki page.
 REPO_LINK               = os.getenv("REPO_LINK", "")
 REPO_SIGNUP_LINK        = _require("REPO_SIGNUP_LINK")
+REPO_ADMIN_PASSPHRASE   = _require("REPO_ADMIN_PASSPHRASE")
+# Only enable if the SVN server uses a self-signed cert; it disables TLS verification.
+SVN_TRUST_SERVER_CERT   = os.getenv("SVN_TRUST_SERVER_CERT", "").lower() == "true"
+
+#Team Links
+FIGMA_LINK              = _require("FIGMA_LINK")
+DRIVE_LINK              = _require("DRIVE_LINK")
+BUILDS_LINK             = _require("BUILDS_LINK")
 
 #Office Hour Info
 OFFICE_HOUR_CHANNEL     = int(_require("OFFICE_HOUR_CHANNEL"))
