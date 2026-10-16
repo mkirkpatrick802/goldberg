@@ -61,19 +61,20 @@ SCOPES = [
 ]
 
 
-def get_worksheet(name: str):
-    """Open a worksheet (tab) of the team's Google Sheet."""
+def get_worksheet(name: str, sheet_key: str = ""):
+    """Open a worksheet (tab) of a Google Sheet; defaults to the team's sheet (DATA_SHEET_KEY)."""
     import gspread
     from google.oauth2.service_account import Credentials
 
     from config import DATA_SHEET_KEY, SERVICE_ACCOUNT_FILE
 
-    if not DATA_SHEET_KEY or not SERVICE_ACCOUNT_FILE:
+    sheet_key = sheet_key or DATA_SHEET_KEY
+    if not sheet_key or not SERVICE_ACCOUNT_FILE:
         raise RuntimeError("DATA_SHEET_KEY / SERVICE_ACCOUNT_FILE are not set.")
 
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     client = gspread.authorize(creds)
-    return client.open_by_key(DATA_SHEET_KEY).worksheet(name)
+    return client.open_by_key(sheet_key).worksheet(name)
 
 
 def _members_from_database() -> list[dict]:

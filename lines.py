@@ -1,7 +1,8 @@
 """
 Goldberg's lines.
 
-Every quip lives in the "Lines" tab of the team's Google Sheet (columns: Category, Line, Active).
+Every quip lives in the "Lines" tab of a Google Sheet (columns: Category, Line, Active):
+the one named by LINES_SHEET_KEY, or the team's sheet (DATA_SHEET_KEY) if that's unset.
 If the sheet can't be reached, the bundled goldberg_lines.xlsx is used instead.
 
 Lines are picked from a shuffled pile per category, so nothing repeats until every
@@ -55,8 +56,9 @@ def _parse_rows(rows: list) -> dict[str, list[str]]:
 
 
 def _load_from_sheet() -> dict[str, list[str]]:
+    from config import LINES_SHEET_KEY
     from utils import get_worksheet
-    return _parse_rows(get_worksheet(LINES_WORKSHEET).get_all_values())
+    return _parse_rows(get_worksheet(LINES_WORKSHEET, LINES_SHEET_KEY).get_all_values())
 
 
 def _load_from_file() -> dict[str, list[str]]:

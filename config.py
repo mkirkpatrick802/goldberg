@@ -59,5 +59,7 @@ MEMBER_SOURCE           = os.getenv("MEMBER_SOURCE", "auto").strip().lower()
 DATA_SHEET_KEY          = os.getenv("DATA_SHEET_KEY", "")
 SERVICE_ACCOUNT_FILE    = os.getenv("SERVICE_ACCOUNT_FILE", "")
 WORKSHEET_NAME          = os.getenv("WORKSHEET_NAME", "Sheet1")
+# Goldberg's lines can live in their own sheet; blank means the "Lines" tab of DATA_SHEET_KEY.
+LINES_SHEET_KEY         = os.getenv("LINES_SHEET_KEY", "")
 TIMEZONE                = ZoneInfo("America/New_York")
 
