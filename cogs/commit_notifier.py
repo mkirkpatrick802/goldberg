@@ -4,12 +4,12 @@ import os
 import re
 import subprocess
 import random
-from nextcord import DiscordServerError, HTTPException
+from nextcord import AllowedMentions, DiscordServerError, HTTPException
 from nextcord.ext import tasks, commands
 import dateutil.parser
 import xml.etree.ElementTree as ET
 
-from config import SERVER_ID, REPO_LINK
+from config import SERVER_ID, REPO_LINK, SVN_TRUST_SERVER_CERT
 
 _SETUP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "setup_data.json")
 
@@ -64,9 +64,10 @@ async def get_latest_commit():
     "--xml", "--incremental",
     "--non-interactive",
     "--config-option", "servers:global:http-timeout=8",
-    "--trust-server-cert",
-    REPO_LINK,
     ]
+    if SVN_TRUST_SERVER_CERT:
+        cmd.append("--trust-server-cert")
+    cmd.append(REPO_LINK)
 
 
     def run():
@@ -150,7 +151,9 @@ class SvnCommits(commands.Cog):
                 return
 
             if "error" in commit_info:
-                await channel.send(commit_info["error"])
+                # Raw SVN errors can include repo URLs and server details; keep them in the log.
+                print(f"[Check SVN Commits] {commit_info['error']}")
+                await channel.send("⚠️ Couldn't reach the SVN repo. Will retry.")
                 return
 
             async for message in channel.history(limit=20):
@@ -186,7 +189,8 @@ class SvnCommits(commands.Cog):
                 f"🔸 **Date:** {commit_info['date']}\n"
                 f"🔸 **Message:** {commit_info['message']}"
             )
-            await channel.send(message)
+            # Commit messages are user-written; don't let them ping @everyone or roles.
+            await channel.send(message, allowed_mentions=AllowedMentions.none())
             self.backoff_seconds = 0  # success resets backoff
 
         except (DiscordServerError, HTTPException) as e:
