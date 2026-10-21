@@ -238,6 +238,9 @@ class Telemetry(commands.Cog):
             if not isinstance(milestones, list) or len(milestones) == 0:
                 return None, None
             sprint = pick_current_milestone(milestones)
+            # Kept so check_sprint can stamp the sprint's dates into telemetry
+            # without a second milestones call.
+            self.current_milestone = sprint
             return sprint.get("name"), project_id
 
     async def get_sprint_tasks(self, project_id, sprint_id):
@@ -268,6 +271,17 @@ class Telemetry(commands.Cog):
             return
 
         data = load_telemetry()
+        # The web app's points need to know where week 1 of a sprint ends
+        # (expected-hours bonus), and telemetry is the only thing it reads from
+        # the bot. Stamped every pass, not just on a change, so the sprint
+        # already running when this shipped gets its dates too, and a date
+        # edited in Taiga mid-sprint is picked up.
+        m = getattr(self, "current_milestone", None) or {}
+        dates = {"start": m.get("estimated_start"), "finish": m.get("estimated_finish")}
+        if dates["start"] and data.setdefault("sprint_dates", {}).get(sprint_name) != dates:
+            data["sprint_dates"][sprint_name] = dates
+            save_telemetry(data)
+
         if data["current_sprint"] == sprint_name:
             return
 
